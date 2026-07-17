@@ -165,20 +165,16 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
             model: modelName,
             messages: allMessages,
             stream: enableStreaming,
-            requestPolicy,
-            maxTokens: extras?.testMode ? 1 : maxTokens,
-            temperature,
-            topP,
-            presencePenalty,
-            frequencyPenalty,
-            thinking,
-            reasoningEffort,
-        });
-
-        // K2.7 API requires top_p: 0.95 exactly — enforce even if user overrides.
-        if (requestPolicy === 'k2' && modelInfo.id.startsWith('kimi-k2.7')) {
-            request.top_p = modelDefaults?.topP ?? 0.95;
-        }
+        includeUsage: enableStreaming,
+        requestPolicy,
+        maxTokens: extras?.testMode ? 1 : maxTokens,
+        temperature,
+        topP,
+        presencePenalty,
+        frequencyPenalty,
+        thinking,
+        reasoningEffort,
+    });
 
         // Convert tools if the model supports tool calling
         const tools = convertTools(toolCallingEnabled, options.tools);
@@ -482,6 +478,7 @@ export function buildKimiRequest(options: {
     model: string;
     messages: KimiMessage[];
     stream: boolean;
+    includeUsage?: boolean;
     requestPolicy: 'k2' | 'k3';
     maxTokens: number;
     temperature: number;
@@ -496,6 +493,10 @@ export function buildKimiRequest(options: {
         messages: options.messages,
         stream: options.stream,
     };
+
+    if (options.stream && options.includeUsage) {
+        request.stream_options = { include_usage: true };
+    }
 
     if (options.requestPolicy === 'k3') {
         request.max_completion_tokens = options.maxTokens;
