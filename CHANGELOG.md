@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.5] - 2026-07-18
+
+### Fixed
+- Reduced default `maxInputTokens` for `kimi-k3` to 262144 (256K) to match the Kimi Code Moderato plan limit. Allegretto+ users can still override to 1M via `kimiCopilot.modelConfigs`.
+
 ## [1.4.4] - 2026-07-18
 
 ### Fixed

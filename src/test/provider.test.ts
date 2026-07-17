@@ -10,7 +10,7 @@ suite('provider helpers', () => {
             const model = MODELS.find((item) => item.id === 'kimi-k3');
             assert.ok(model);
             assert.strictEqual(model.requestPolicy, 'k3');
-            assert.strictEqual(model.maxInputTokens, 1048576);
+            assert.strictEqual(model.maxInputTokens, 262144);
             assert.strictEqual(model.maxOutputTokens, 131072);
             assert.strictEqual(model.capabilities.imageInput, true);
             assert.strictEqual(model.defaults?.reasoningEffort, 'max');

@@ -79,9 +79,19 @@ Provider implements the 3 mandatory methods of `LanguageModelChatProvider`:
 
 ### Kimi K3 API behavior
 
-K3 uses `kimi-k3`, a context window of up to 1M tokens, native image input, and `reasoning_effort`. Thinking is always enabled for K3. The provider sends `max_completion_tokens` and omits K2.x-only sampling and penalty parameters. K3 image parts are encoded as base64 `data:` URLs; public image URLs are not used.
+K3 uses `kimi-k3`, native image input, and `reasoning_effort`. Thinking is always enabled for K3. The provider sends `max_completion_tokens` and omits K2.x-only sampling and penalty parameters. K3 image parts are encoded as base64 `data:` URLs; public image URLs are not used.
 
-### Local usage statistics
+**Context limits:** the default Kimi Code endpoint exposes K3 with a **256K** context window on the Moderato plan; Allegretto and above unlock the full **1M** context. If you have an Allegretto+ plan, override the reported limit in `kimiCopilot.modelConfigs`:
+
+```json
+{
+  "kimiCopilot.modelConfigs": {
+    "kimi-k3": {
+      "maxInputTokens": 1048576
+    }
+  }
+}
+```
 
 The extension tracks token usage reported by the Kimi API (prompt, completion, total and cached tokens) and shows it in the VS Code status bar. Click the status bar item or run **Kimi Copilot: Show Usage Statistics** for details. Run **Kimi Copilot: Reset Usage Statistics** to clear the counters. These statistics are local to the extension and do not reflect the remaining account balance shown in the Kimi Code console.
 

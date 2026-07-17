@@ -17,10 +17,11 @@ K3 uses `kimi-k3`, up to 1M context, `max_completion_tokens`, and `reasoning_eff
 
 | Picker ID | API Model | Context | Notes |
 |---|---|---|---|
-| `kimi-k2.7-code` | `kimi-k2.7-code` | 256K / 32K | Default coding model, thinking required |
-| `kimi-k2.7-code-highspeed` | `kimi-k2.7-code-highspeed` | 256K / 32K | Faster output (~180 T/s) |
-| `kimi-k2.6` | `kimi-k2.6` | 256K / 32K | Multimodal + thinking |
-| `kimi-k2.5` | `kimi-k2.5` | 256K / 32K | Multimodal + thinking |
+| `kimi-k3` | `kimi-k3` | 256K default, 1M with Allegretto+ | Native vision, tool calling, reasoning effort |
+| `kimi-k2.7-code` | `kimi-k2.7-code` | 256K | Default coding model, thinking required |
+| `kimi-k2.7-code-highspeed` | `kimi-k2.7-code-highspeed` | 256K | Faster output (~180 T/s) |
+| `kimi-k2.6` | `kimi-k2.6` | 256K | Multimodal + thinking |
+| `kimi-k2.5` | `kimi-k2.5` | 256K | Multimodal + thinking |
 
 ## Architecture
 

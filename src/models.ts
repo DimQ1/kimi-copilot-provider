@@ -11,8 +11,8 @@ export const MODELS: ModelDefinition[] = [
 		name: 'Kimi K3',
 		family: 'kimi',
 		version: 'kimi-k3',
-		detail: 'Flagship model (up to 1M context, native vision, reasoning effort)',
-		maxInputTokens: 1048576,
+		detail: 'Flagship model (256K context on Moderato, 1M on Allegretto+, native vision, reasoning effort)',
+		maxInputTokens: 262144,
 		maxOutputTokens: 131072,
 		capabilities: {
 			toolCalling: true,
