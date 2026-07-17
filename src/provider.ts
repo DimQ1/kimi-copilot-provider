@@ -1,7 +1,8 @@
 import * as vscode from 'vscode';
 import { ConfigurationManager } from './config';
-import { MODELS, toChatInfo, getModelCapabilities, getMaxOutputTokens, getModelDefaults } from './models';
-import type { KimiMessage, KimiTool, KimiToolCall, KimiRequest, KimiStreamChunk } from './types';
+import { MODELS, toChatInfo, getModelCapabilities, getMaxOutputTokens, getModelDefaults, findModelById } from './models';
+import { UsageTracker, hasUsage } from './usage';
+import type { KimiContentPart, KimiMessage, KimiTool, KimiToolCall, KimiRequest, KimiStreamChunk } from './types';
 
 // ═══════════════════════════════════════════════════════════════════════
 // Constants
@@ -21,7 +22,10 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
     private readonly outputChannel: vscode.LogOutputChannel;
     private readonly disposables: vscode.Disposable[] = [];
 
-    constructor(private readonly configManager: ConfigurationManager) {
+    constructor(
+        private readonly configManager: ConfigurationManager,
+        private readonly usageTracker: UsageTracker,
+    ) {
         this.outputChannel = vscode.window.createOutputChannel('Kimi Copilot', { log: true });
 
         // Watch for API key / config changes and refresh the model picker.
@@ -36,6 +40,11 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
     /** Force Copilot Chat to re-query model information. */
     refreshModelPicker(): void {
         this._onDidChange.fire();
+    }
+
+    /** Access the local usage tracker for status bar / commands. */
+    getUsageTracker(): UsageTracker {
+        return this.usageTracker;
     }
 
     // ── Model information ──────────────────────────────────────────
@@ -106,6 +115,10 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
         const modelName = this.configManager.getApiModelId(modelInfo.id);
         const modelConfig = this.configManager.getModelConfig(modelInfo.id);
         const modelDefaults = getModelDefaults(modelInfo.id);
+        const modelDefinition = findModelById(modelInfo.id);
+        const requestPolicy = modelName === 'kimi-k3'
+            ? 'k3'
+            : modelDefinition?.requestPolicy ?? modelDefaults?.requestPolicy ?? 'k2';
 
         // Effective parameters: model config > global setting > hard-coded model default.
         const temperature =
@@ -127,10 +140,13 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
             modelConfig.thinking ??
             this.configManager.getThinking(modelInfo.id) ??
             modelDefaults?.thinking;
+        const reasoningEffort = modelConfig.reasoningEffort ?? modelDefaults?.reasoningEffort;
 
         const maxTokensSetting = this.configManager.getMaxTokens(modelInfo.id);
         const maxOutputTokens = modelConfig.maxOutputTokens ?? getMaxOutputTokens(modelInfo.id);
-        const maxTokens = maxTokensSetting > 0 ? maxTokensSetting : maxOutputTokens;
+        const maxTokens = maxTokensSetting > 0
+            ? Math.min(maxTokensSetting, 1048576)
+            : maxOutputTokens;
 
         const enableStreaming = extras?.testMode ? false : this.configManager.getEnableStreaming();
         const timeout = this.configManager.getTimeout();
@@ -145,23 +161,22 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
             allMessages.unshift({ role: 'system', content: systemPrompt });
         }
 
-        const request: KimiRequest = {
+        const request = buildKimiRequest({
             model: modelName,
             messages: allMessages,
             stream: enableStreaming,
+            requestPolicy,
+            maxTokens: extras?.testMode ? 1 : maxTokens,
             temperature,
-            top_p: topP,
-            max_tokens: extras?.testMode ? 1 : maxTokens,
-            presence_penalty: presencePenalty,
-            frequency_penalty: frequencyPenalty,
-        };
-
-        if (thinking) {
-            request.thinking = thinking;
-        }
+            topP,
+            presencePenalty,
+            frequencyPenalty,
+            thinking,
+            reasoningEffort,
+        });
 
         // K2.7 API requires top_p: 0.95 exactly — enforce even if user overrides.
-        if (modelInfo.id.startsWith('kimi-k2.7')) {
+        if (requestPolicy === 'k2' && modelInfo.id.startsWith('kimi-k2.7')) {
             request.top_p = modelDefaults?.topP ?? 0.95;
         }
 
@@ -199,9 +214,9 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
             }
 
             if (enableStreaming) {
-                await streamSSEResponse(response, progress, token, this.outputChannel);
+                await streamSSEResponse(response, progress, token, this.outputChannel, this.usageTracker);
             } else {
-                await completeResponse(response, progress, this.outputChannel);
+                await completeResponse(response, progress, this.outputChannel, this.usageTracker);
             }
 
             this.outputChannel.info(`← completed in ${Date.now() - startTime}ms`);
@@ -308,9 +323,13 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
     private toLanguageModelError(status: number, body: string): vscode.LanguageModelError {
         switch (status) {
             case 401:
-                return new vscode.LanguageModelError(
-                    'Invalid Kimi API key (401). Run "Kimi Copilot: Set API Key" to update.',
-                );
+                {
+                    const detail = body.trim().replace(/\s+/g, ' ').slice(0, 240);
+                    const credentialHint = 'For the default /coding/ endpoint, use a key created in the Kimi Code Console, not a Kimi Platform key.';
+                    return new vscode.LanguageModelError(
+                        `Invalid Kimi API key (401). ${credentialHint} Run "Kimi Copilot: Set API Key" to update.${detail ? ` Server response: ${detail}` : ''}`,
+                    );
+                }
             case 403:
                 return new vscode.LanguageModelError(
                     'Access denied by Kimi API (403).',
@@ -370,12 +389,27 @@ export function convertMessages(
     for (const message of messages) {
         const role = roleToString(message.role);
         let content = '';
+        const contentParts: KimiContentPart[] = [];
         const toolCalls: KimiToolCall[] = [];
         const toolResults: Array<{ callId: string; content: string }> = [];
 
         for (const part of message.content) {
             if (part instanceof vscode.LanguageModelTextPart) {
                 content += part.value;
+                contentParts.push({ type: 'text', text: part.value });
+            } else if (isLanguageModelDataPart(part)) {
+                if (part.mimeType.startsWith('image/')) {
+                    contentParts.push({
+                        type: 'image_url',
+                        image_url: {
+                            url: `data:${part.mimeType};base64,${Buffer.from(part.data).toString('base64')}`,
+                        },
+                    });
+                }
+            } else if (part instanceof vscode.LanguageModelPromptTsxPart) {
+                const value = typeof part.value === 'string' ? part.value : JSON.stringify(part.value);
+                content += value;
+                contentParts.push({ type: 'text', text: value });
             } else if (part instanceof vscode.LanguageModelToolCallPart) {
                 toolCalls.push({
                     id: part.callId,
@@ -416,7 +450,12 @@ export function convertMessages(
             }
         } else {
             if (content) {
-                result.push({ role: role as 'user' | 'assistant', content });
+                result.push({
+                    role: role as 'user' | 'assistant',
+                    content: contentParts.length > 1 ? contentParts : content,
+                });
+            } else if (contentParts.length > 0) {
+                result.push({ role: role as 'user' | 'assistant', content: contentParts });
             }
         }
 
@@ -431,6 +470,48 @@ export function convertMessages(
     }
 
     return result;
+}
+
+function isLanguageModelDataPart(
+    part: unknown,
+): part is vscode.LanguageModelDataPart {
+    return typeof vscode.LanguageModelDataPart !== 'undefined' && part instanceof vscode.LanguageModelDataPart;
+}
+
+export function buildKimiRequest(options: {
+    model: string;
+    messages: KimiMessage[];
+    stream: boolean;
+    requestPolicy: 'k2' | 'k3';
+    maxTokens: number;
+    temperature: number;
+    topP: number;
+    presencePenalty: number;
+    frequencyPenalty: number;
+    thinking?: { type: 'enabled' | 'disabled' };
+    reasoningEffort?: 'low' | 'high' | 'max';
+}): KimiRequest {
+    const request: KimiRequest = {
+        model: options.model,
+        messages: options.messages,
+        stream: options.stream,
+    };
+
+    if (options.requestPolicy === 'k3') {
+        request.max_completion_tokens = options.maxTokens;
+        request.reasoning_effort = options.reasoningEffort ?? 'max';
+    } else {
+        request.temperature = options.temperature;
+        request.top_p = options.topP;
+        request.max_tokens = options.maxTokens;
+        request.presence_penalty = options.presencePenalty;
+        request.frequency_penalty = options.frequencyPenalty;
+        if (options.thinking) {
+            request.thinking = options.thinking;
+        }
+    }
+
+    return request;
 }
 
 export function convertTools(
@@ -459,6 +540,7 @@ async function completeResponse(
     response: Response,
     progress: vscode.Progress<vscode.LanguageModelResponsePart>,
     outputChannel: vscode.LogOutputChannel,
+    usageTracker: UsageTracker,
 ): Promise<void> {
     const data = (await response.json()) as {
         choices: Array<{
@@ -469,7 +551,17 @@ async function completeResponse(
             };
             finish_reason: string | null;
         }>;
+        usage?: {
+            prompt_tokens?: number;
+            completion_tokens?: number;
+            total_tokens?: number;
+            cached_tokens?: number;
+        };
     };
+
+    if (hasUsage(data.usage)) {
+        usageTracker.recordUsage(data.usage);
+    }
 
     const message = data.choices[0]?.message;
     if (!message) {
@@ -503,6 +595,7 @@ async function streamSSEResponse(
     progress: vscode.Progress<vscode.LanguageModelResponsePart>,
     token: vscode.CancellationToken,
     outputChannel: vscode.LogOutputChannel,
+    usageTracker: UsageTracker,
 ): Promise<void> {
     const reader = response.body?.getReader();
     if (!reader) {
@@ -577,8 +670,17 @@ async function streamSSEResponse(
                 try {
                     const parsed = JSON.parse(payload) as KimiStreamChunk;
                     const delta = parsed.choices[0]?.delta;
+
+                    if (hasUsage(parsed.usage)) {
+                        usageTracker.recordUsage(parsed.usage);
+                    }
+
                     if (!delta) {
                         continue;
+                    }
+
+                    if (delta.reasoning_content) {
+                        outputChannel.debug(`Kimi reasoning delta received (${delta.reasoning_content.length} chars)`);
                     }
 
                     // Text content

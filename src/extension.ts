@@ -1,17 +1,35 @@
 import * as vscode from 'vscode';
 import { ConfigurationManager } from './config';
 import { KimiChatProvider } from './provider';
+import { UsageTracker } from './usage';
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
     const configManager = new ConfigurationManager(context.secrets);
-    const provider = new KimiChatProvider(configManager);
+    const usageTracker = new UsageTracker(context.globalState);
+    const provider = new KimiChatProvider(configManager, usageTracker);
 
     context.subscriptions.push(
         vscode.lm.registerLanguageModelChatProvider('kimi-copilot', provider),
         provider,
     );
 
-    registerCommands(context, configManager, provider);
+    const statusBar = vscode.window.createStatusBarItem(
+        vscode.StatusBarAlignment.Right,
+        100,
+    );
+    statusBar.command = 'kimi-copilot.showUsageStats';
+    statusBar.tooltip = 'Kimi Copilot usage statistics';
+    statusBar.text = usageTracker.getStatusBarText();
+    statusBar.show();
+    context.subscriptions.push(statusBar);
+
+    context.subscriptions.push(
+        usageTracker.onDidChange(() => {
+            statusBar.text = usageTracker.getStatusBarText();
+        }),
+    );
+
+    registerCommands(context, configManager, provider, usageTracker);
 
     // Copilot Chat may serve cached model info. Activate it first so the
     // refresh reaches a live listener and re-queries the provider.
@@ -28,6 +46,7 @@ function registerCommands(
     context: vscode.ExtensionContext,
     configManager: ConfigurationManager,
     provider: KimiChatProvider,
+    usageTracker: UsageTracker,
 ): void {
     context.subscriptions.push(
         vscode.commands.registerCommand('kimi-copilot.setApiKey', async () => {
@@ -50,6 +69,12 @@ function registerCommands(
                 provider.refreshModelPicker();
                 vscode.window.showInformationMessage('Kimi API key saved securely.');
             }
+        }),
+
+        vscode.commands.registerCommand('kimi-copilot.clearApiKey', async () => {
+            await configManager.deleteApiKey();
+            provider.refreshModelPicker();
+            vscode.window.showInformationMessage('Stored Kimi API key cleared.');
         }),
 
         vscode.commands.registerCommand('kimi-copilot.selectModel', async () => {
@@ -138,6 +163,23 @@ function registerCommands(
                 vscode.window.showInformationMessage('Kimi connection OK.');
             } catch (err) {
                 vscode.window.showErrorMessage(`Kimi connection failed: ${err instanceof Error ? err.message : String(err)}`);
+            }
+        }),
+
+        vscode.commands.registerCommand('kimi-copilot.showUsageStats', () => {
+            const stats = usageTracker.getFormattedStats();
+            vscode.window.showInformationMessage(`Kimi Copilot usage: ${stats}`);
+        }),
+
+        vscode.commands.registerCommand('kimi-copilot.resetUsageStats', async () => {
+            const answer = await vscode.window.showWarningMessage(
+                'Reset local Kimi Copilot usage statistics?',
+                { modal: true },
+                'Reset',
+            );
+            if (answer === 'Reset') {
+                usageTracker.reset();
+                vscode.window.showInformationMessage('Kimi Copilot usage statistics reset.');
             }
         }),
 

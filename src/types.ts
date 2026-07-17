@@ -6,9 +6,21 @@
 
 export interface KimiMessage {
 	role: 'system' | 'user' | 'assistant' | 'tool';
-	content: string;
+	content: string | KimiContentPart[];
 	tool_call_id?: string;
 	tool_calls?: KimiToolCall[];
+}
+
+export type KimiContentPart = KimiTextContentPart | KimiImageContentPart;
+
+export interface KimiTextContentPart {
+	type: 'text';
+	text: string;
+}
+
+export interface KimiImageContentPart {
+	type: 'image_url';
+	image_url: { url: string };
 }
 
 export interface KimiToolCall {
@@ -33,6 +45,7 @@ export interface KimiUsage {
 	prompt_tokens: number;
 	completion_tokens: number;
 	total_tokens: number;
+	cached_tokens?: number;
 }
 
 export interface KimiRequest {
@@ -45,6 +58,8 @@ export interface KimiRequest {
 	presence_penalty?: number;
 	frequency_penalty?: number;
 	thinking?: { type: 'enabled' | 'disabled' };
+	reasoning_effort?: 'low' | 'high' | 'max';
+	max_completion_tokens?: number;
 	tools?: KimiTool[];
 	tool_choice?: 'none' | 'auto' | 'required';
 }
@@ -59,6 +74,7 @@ export interface KimiStreamChunk {
 		delta: {
 			role?: string;
 			content?: string;
+			reasoning_content?: string;
 			tool_calls?: Array<{
 				index: number;
 				id?: string;
@@ -92,6 +108,10 @@ export interface ModelDefaults {
 	topP?: number;
 	/** Thinking mode default (K2.7 requires enabled). */
 	thinking?: { type: 'enabled' | 'disabled' };
+	/** K3 reasoning effort; K3 always has thinking enabled. */
+	reasoningEffort?: 'low' | 'high' | 'max';
+	/** Request policy used to select the model-specific API contract. */
+	requestPolicy?: 'k2' | 'k3';
 }
 
 export interface ModelConfigOverride {
@@ -111,6 +131,8 @@ export interface ModelConfigOverride {
 	frequencyPenalty?: number;
 	/** Thinking mode override. */
 	thinking?: { type: 'enabled' | 'disabled' };
+	/** Reasoning effort for K3. */
+	reasoningEffort?: 'low' | 'high' | 'max';
 	/** Per-model system prompt. */
 	systemPrompt?: string;
 	/** Whether tool calling is enabled for this model. */
@@ -136,6 +158,8 @@ export interface ModelDefinition {
 	capabilities: ModelCapabilities;
 	/** Hard-coded API defaults for this model. */
 	defaults?: ModelDefaults;
+	/** API contract family for request construction. */
+	requestPolicy: 'k2' | 'k3';
 }
 
 export interface KimiModelsResponse {

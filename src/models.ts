@@ -7,6 +7,25 @@ import type { ModelDefinition, ModelCapabilities, ModelDefaults, ModelConfigOver
 
 export const MODELS: ModelDefinition[] = [
 	{
+		id: 'kimi-k3',
+		name: 'Kimi K3',
+		family: 'kimi',
+		version: 'kimi-k3',
+		detail: 'Flagship model (up to 1M context, native vision, reasoning effort)',
+		maxInputTokens: 1048576,
+		maxOutputTokens: 131072,
+		capabilities: {
+			toolCalling: true,
+			imageInput: true,
+			thinking: true,
+		},
+		requestPolicy: 'k3',
+		defaults: {
+			reasoningEffort: 'max',
+			requestPolicy: 'k3',
+		},
+	},
+	{
 		id: 'kimi-k2.7-code',
 		name: 'Kimi K2.7 Code',
 		family: 'kimi',
@@ -19,6 +38,7 @@ export const MODELS: ModelDefinition[] = [
 			imageInput: false,
 			thinking: true,
 		},
+		requestPolicy: 'k2',
 		defaults: {
 			temperature: 1.0,
 			topP: 0.95,
@@ -38,6 +58,7 @@ export const MODELS: ModelDefinition[] = [
 			imageInput: false,
 			thinking: true,
 		},
+		requestPolicy: 'k2',
 		defaults: {
 			temperature: 1.0,
 			topP: 0.95,
@@ -57,6 +78,7 @@ export const MODELS: ModelDefinition[] = [
 			imageInput: true,
 			thinking: true,
 		},
+		requestPolicy: 'k2',
 		defaults: {
 			temperature: 1.0,
 			topP: 0.95,
@@ -76,6 +98,7 @@ export const MODELS: ModelDefinition[] = [
 			imageInput: true,
 			thinking: true,
 		},
+		requestPolicy: 'k2',
 		defaults: {
 			temperature: 1.0,
 			topP: 1.0,

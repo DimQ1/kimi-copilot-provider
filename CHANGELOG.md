@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Added Kimi K3 support with up to 1M context, `reasoning_effort`, native image input conversion, and K3-specific request parameters.
+- Added a command to clear the stored API key and diagnostics for invalid credentials.
+- Added local usage statistics tracking (prompt/completion/total/cached tokens and request count) from Kimi API responses, shown in the status bar.
 - Added ESLint configuration using `typescript-eslint`.
 - Added GitHub Actions CI workflow for build and lint checks.
 - Added per-model `modelConfigs` overrides (temperature, topP, max tokens, system prompt, tool calling, etc.).

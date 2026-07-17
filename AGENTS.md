@@ -13,6 +13,8 @@ VS Code extension that registers **Kimi K2/K2.7 Code** models as custom `Languag
 
 ## Supported Models
 
+K3 uses `kimi-k3`, up to 1M context, `max_completion_tokens`, and `reasoning_effort`. It always has thinking enabled, omits K2.x fixed sampling parameters, and accepts image data as base64 content parts.
+
 | Picker ID | API Model | Context | Notes |
 |---|---|---|---|
 | `kimi-k2.7-code` | `kimi-k2.7-code` | 256K / 32K | Default coding model, thinking required |
@@ -38,6 +40,8 @@ Provider implements 3 mandatory methods of `LanguageModelChatProvider<T>`:
 
 Kimi API: `POST https://api.kimi.com/coding/v1/chat/completions`, auth via `Bearer sk-kimi-...`, SSE `data:` streaming.
 Response format: OpenAI-compatible `{"choices":[{"delta":{"content":"..."}}]}` with `data: [DONE]` terminator.
+
+Local usage statistics (prompt/completion/total/cached tokens and request count) are persisted in `ExtensionContext.globalState` and updated from the `usage` field in every chat completion response.
 
 ## Per-Model Configuration
 

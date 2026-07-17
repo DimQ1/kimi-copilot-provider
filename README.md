@@ -1,11 +1,12 @@
 # Kimi Copilot Provider
 
-VS Code extension that registers **Kimi K2/K2.7 Code** models as a custom language model provider for GitHub Copilot Chat. Proxies chat requests to the Kimi API via SSE streaming.
+VS Code extension that registers **Kimi K3 and K2.x** models as a custom language model provider for GitHub Copilot Chat. Proxies chat requests to the Kimi API via SSE streaming.
 
 ## Supported Models
 
 | Picker ID | API Model | Context | Notes |
 |---|---|---|---|
+| `kimi-k3` | `kimi-k3` | Up to 1M | Native vision, tool calling, reasoning effort |
 | `kimi-k2.7-code` | `kimi-k2.7-code` | 256K / 32K | Default coding model, thinking required |
 | `kimi-k2.7-code-highspeed` | `kimi-k2.7-code-highspeed` | 256K / 32K | Faster output (~180 T/s) |
 | `kimi-k2.6` | `kimi-k2.6` | 256K / 32K | Multimodal + thinking |
@@ -34,6 +35,8 @@ npm run compile
 
 Run **Kimi Copilot: Set API Key** from the Command Palette (`Ctrl+Shift+P`) and paste your Kimi API key.
 
+For the default endpoint (`https://api.kimi.com/coding/v1/chat/completions`), create the key in the [Kimi Code Console](https://www.kimi.com/code/console). A Kimi Open Platform key belongs to a different API and will return `401`. If an old key is stored in SecretStorage, run **Kimi Copilot: Clear Stored API Key** before setting the new one.
+
 Or open VS Code Settings (`Ctrl+,`) and search for `kimiCopilot`:
 
 | Setting | Default | Description |
@@ -41,9 +44,9 @@ Or open VS Code Settings (`Ctrl+,`) and search for `kimiCopilot`:
 | `kimiCopilot.model` | `kimi-k2.7-code` | Default Kimi model ID used in chat |
 | `kimiCopilot.endpoint` | `https://api.kimi.com/coding/v1/chat/completions` | API endpoint |
 | `kimiCopilot.baseUrl` | `https://api.kimi.com` | Base URL for the Kimi API |
-| `kimiCopilot.temperature` | `1.0` | Sampling temperature (fixed at 1.0 by Kimi K2.7 API) |
-| `kimiCopilot.maxTokens` | `0` | Max output tokens (`0` = model default) |
-| `kimiCopilot.topP` | `0.95` | Fixed to 0.95 by Kimi K2.7 API |
+| `kimiCopilot.temperature` | `1.0` | Sampling temperature for K2.x; K3 omits this fixed parameter |
+| `kimiCopilot.maxTokens` | `0` | Max output tokens; K3 sends `max_completion_tokens` |
+| `kimiCopilot.topP` | `0.95` | Sampling parameter for K2.x; K3 omits this fixed parameter |
 | `kimiCopilot.systemPrompt` | (see `config.ts`) | System prompt sent with every request |
 | `kimiCopilot.modelConfigs` | `{}` | Per-model overrides for parameters |
 
@@ -74,12 +77,23 @@ Provider implements the 3 mandatory methods of `LanguageModelChatProvider`:
 2. Click the model picker → **Manage Models**
 3. Find **Kimi Copilot Provider** → ✅ check the desired model
 
+### Kimi K3 API behavior
+
+K3 uses `kimi-k3`, a context window of up to 1M tokens, native image input, and `reasoning_effort`. Thinking is always enabled for K3. The provider sends `max_completion_tokens` and omits K2.x-only sampling and penalty parameters. K3 image parts are encoded as base64 `data:` URLs; public image URLs are not used.
+
+### Local usage statistics
+
+The extension tracks token usage reported by the Kimi API (prompt, completion, total and cached tokens) and shows it in the VS Code status bar. Click the status bar item or run **Kimi Copilot: Show Usage Statistics** for details. Run **Kimi Copilot: Reset Usage Statistics** to clear the counters. These statistics are local to the extension and do not reflect the remaining account balance shown in the Kimi Code console.
+
 ## Management Commands
 
 - **Kimi Copilot: Set API Key** — store API key securely in SecretStorage
+- **Kimi Copilot: Clear Stored API Key** — remove the key currently taking precedence over the deprecated setting
 - **Kimi Copilot: Select Default Model** — choose the default model
 - **Kimi Copilot: Edit Model Configuration** — per-model JSON overrides
 - **Kimi Copilot: Test Connection** — verify connectivity and credentials
+- **Kimi Copilot: Show Usage Statistics** — view local token/request statistics collected from API responses
+- **Kimi Copilot: Reset Usage Statistics** — clear the local usage counters
 - **Kimi Copilot: Open Settings** — open settings directly
 
 ## Development

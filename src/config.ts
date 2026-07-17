@@ -22,14 +22,16 @@ export class ConfigurationManager {
 	/** Returns the API key from SecretStorage, with plain-text fallback. */
 	async getApiKey(): Promise<string | undefined> {
 		const fromSecret = await this.secretStorage.get(API_KEY_SECRET_KEY);
-		if (fromSecret) {
-			return fromSecret;
+		const normalizedSecret = fromSecret?.trim();
+		if (normalizedSecret) {
+			return normalizedSecret;
 		}
 
 		// Fallback for migration from plain-text settings.
 		const fromConfig = this.config.get<string>('apiKey', '');
-		if (fromConfig.trim().length > 0) {
-			return fromConfig;
+		const normalizedConfig = fromConfig.trim();
+		if (normalizedConfig) {
+			return normalizedConfig;
 		}
 
 		return undefined;
@@ -37,7 +39,11 @@ export class ConfigurationManager {
 
 	/** Stores the API key securely in VS Code SecretStorage. */
 	async setApiKey(value: string): Promise<void> {
-		await this.secretStorage.store(API_KEY_SECRET_KEY, value);
+		const normalizedValue = value.trim();
+		if (!normalizedValue) {
+			throw new Error('API key cannot be empty');
+		}
+		await this.secretStorage.store(API_KEY_SECRET_KEY, normalizedValue);
 	}
 
 	/** Removes the stored API key. */
