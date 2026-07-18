@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.6] - 2026-07-18
+
+### Fixed
+- Reported Kimi API usage back to Copilot Chat via `LanguageModelDataPart` with mime type `usage`, matching the undocumented convention used by DeepSeek V4 for Copilot. This enables the native "Session Info" / "Context Window" UI to update token counts.
+
 ## [1.5.5] - 2026-07-18
 
 ### Added

@@ -650,6 +650,7 @@ async function completeResponse(
 
     if (hasUsage(data.usage)) {
         usageTracker.recordUsage(data.usage);
+        reportCopilotContextUsage(progress, data.usage);
     }
 
     const message = data.choices[0]?.message;
@@ -762,6 +763,7 @@ async function streamSSEResponse(
 
                     if (hasUsage(parsed.usage)) {
                         usageTracker.recordUsage(parsed.usage);
+                        reportCopilotContextUsage(progress, parsed.usage);
                     }
 
                     if (!delta) {
@@ -821,5 +823,32 @@ function safeParseArgs(args: string): Record<string, unknown> {
         return JSON.parse(args) as Record<string, unknown>;
     } catch {
         return {};
+    }
+}
+
+const COPILOT_USAGE_DATA_PART_MIME = 'usage';
+
+function reportCopilotContextUsage(
+    progress: vscode.Progress<vscode.LanguageModelResponsePart>,
+    usage: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number; cached_tokens?: number },
+): void {
+    const data = {
+        prompt_tokens: usage.prompt_tokens ?? 0,
+        completion_tokens: usage.completion_tokens ?? 0,
+        total_tokens: usage.total_tokens ?? 0,
+        prompt_tokens_details: {
+            cached_tokens: usage.cached_tokens ?? 0,
+        },
+    };
+
+    try {
+        progress.report(
+            new vscode.LanguageModelDataPart(
+                new TextEncoder().encode(JSON.stringify(data)),
+                COPILOT_USAGE_DATA_PART_MIME,
+            ),
+        );
+    } catch {
+        // Best-effort: Copilot Chat may not consume this mime type in all versions.
     }
 }

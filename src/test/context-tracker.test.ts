@@ -20,7 +20,7 @@ suite('SessionContextTracker', () => {
 			warningThreshold: 0.8,
 			errorThreshold: 0.95,
 		});
-		const longText = 'a'.repeat(820 * 3); // ~820 tokens
+		const longText = 'a'.repeat(820 * 4); // ~937 tokens
 		const estimate = tracker.estimate([{ role: 'user', content: longText }]);
 		assert.ok(estimate.ratio >= 0.8);
 		assert.strictEqual(estimate.status, 'warning');
