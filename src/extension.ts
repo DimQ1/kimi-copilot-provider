@@ -4,6 +4,7 @@ import { KimiChatProvider } from './provider';
 import { UsageTracker } from './usage';
 import { KimiUsageClient } from './usage-client';
 import { showUsageDetailsPanel } from './usage-webview';
+import { showUsageQuickPick } from './usage-popup';
 
 const QUOTA_REFRESH_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
 const QUOTA_WARNING_THRESHOLD = 0.8;
@@ -24,8 +25,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         vscode.StatusBarAlignment.Right,
         100,
     );
-    statusBar.command = 'kimi-copilot.showUsageStats';
-    statusBar.tooltip = new vscode.MarkdownString('Kimi Copilot usage statistics\n\nClick to open detailed usage panel.', true);
+    statusBar.command = 'kimi-copilot.showUsagePopup';
+    statusBar.tooltip = new vscode.MarkdownString('Kimi Copilot usage statistics\n\nClick to open usage popup.', true);
     statusBar.text = usageTracker.getStatusBarText();
     statusBar.show();
     context.subscriptions.push(statusBar);
@@ -253,6 +254,10 @@ function registerCommands(
             } catch (err) {
                 vscode.window.showErrorMessage(`Kimi connection failed: ${err instanceof Error ? err.message : String(err)}`);
             }
+        }),
+
+        vscode.commands.registerCommand('kimi-copilot.showUsagePopup', () => {
+            showUsageQuickPick(context, usageTracker);
         }),
 
         vscode.commands.registerCommand('kimi-copilot.showUsageStats', () => {
