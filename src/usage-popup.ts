@@ -2,98 +2,87 @@ import * as vscode from 'vscode';
 import type { UsageTracker } from './usage';
 import { showUsageDetailsPanel } from './usage-webview';
 
-export function showUsageQuickPick(
+function renderProgressBar(ratio: number, width = 10): string {
+	const filled = Math.min(width, Math.max(0, Math.round(ratio * width)));
+	const empty = width - filled;
+	const bar = '█'.repeat(filled) + '░'.repeat(empty);
+	return `${bar} ${Math.round(ratio * 100)}%`;
+}
+
+function renderRow(label: string, used: number, limit: number, resetHint?: string): string {
+	if (limit <= 0) {
+		return `${label}: ${used.toLocaleString('en-US')}`;
+	}
+	const remaining = Math.max(0, limit - used);
+	return [
+		`${label}: ${renderProgressBar(used / limit)}`,
+		`  ${used.toLocaleString('en-US')} / ${limit.toLocaleString('en-US')} used · ${remaining.toLocaleString('en-US')} left${resetHint ? ` · ${resetHint}` : ''}`,
+	].join('\n');
+}
+
+export async function showUsageQuickPick(
 	context: vscode.ExtensionContext,
 	usageTracker: UsageTracker,
-): void {
+): Promise<void> {
 	const quota = usageTracker.getQuota();
 	const stats = usageTracker.getStats();
 	const error = usageTracker.getQuotaError();
 
-	const quickPick = vscode.window.createQuickPick();
-	quickPick.title = 'Kimi Copilot Usage';
-	quickPick.placeholder = 'Select an action';
-
-	const items: vscode.QuickPickItem[] = [];
+	const lines: string[] = [];
 
 	const summary = quota?.summary;
 	if (summary && summary.limit > 0) {
-		const ratio = summary.used / summary.limit;
-		const percent = Math.round(ratio * 100);
-		const remaining = Math.max(0, summary.limit - summary.used);
-		items.push({
-			label: `$(graph) ${percent}% used`,
-			detail: `${summary.used} / ${summary.limit} used · ${remaining} left${summary.resetHint ? ` · resets ${summary.resetHint}` : ''}`,
-			alwaysShow: true,
-		});
+		lines.push(renderRow('Kimi Code quota', summary.used, summary.limit, summary.resetHint));
 	} else if (error) {
-		items.push({
-			label: `$(warning) Quota unavailable`,
-			detail: error,
-			alwaysShow: true,
-		});
+		lines.push(`Quota: ${error}`);
 	} else {
-		items.push({
-			label: `$(graph) No quota data yet`,
-			detail: 'Refresh quota to load the latest usage from Kimi.',
-			alwaysShow: true,
-		});
+		lines.push('Kimi Code quota: no data yet. Refresh to load usage.');
 	}
 
 	for (const limit of quota?.limits ?? []) {
-		if (limit.limit <= 0) continue;
-		const remaining = Math.max(0, limit.limit - limit.used);
-		items.push({
-			label: `$(clock) ${limit.label}`,
-			detail: `${limit.used} / ${limit.limit} used · ${remaining} left${limit.resetHint ? ` · resets ${limit.resetHint}` : ''}`,
-			alwaysShow: true,
-		});
+		if (limit.limit > 0) {
+			lines.push(renderRow(limit.label, limit.used, limit.limit, limit.resetHint));
+		}
 	}
 
-	items.push(
-		{
-			label: '$(graph-line) Open detailed usage panel',
-			detail: 'Open full usage breakdown in a new editor tab.',
-			alwaysShow: true,
-		},
-		{
-			label: '$(refresh) Refresh quota',
-			detail: 'Fetch the latest quota data from Kimi Code.',
-			alwaysShow: true,
-		},
-		{
-			label: '$(link-external) Open Kimi Console',
-			detail: 'Open the Kimi platform console in your browser.',
-			alwaysShow: true,
-		},
-		{
-			label: '$(trash) Reset local statistics',
-			detail: `Reset local counters: ${stats.requestCount} requests, ${stats.totalTokens} tokens.`,
-			alwaysShow: true,
-		},
+	lines.push('');
+	lines.push('Local stats');
+	lines.push(`  Requests: ${stats.requestCount.toLocaleString('en-US')}`);
+	lines.push(`  Prompt tokens: ${stats.promptTokens.toLocaleString('en-US')}`);
+	lines.push(`  Completion tokens: ${stats.completionTokens.toLocaleString('en-US')}`);
+	lines.push(`  Total tokens: ${stats.totalTokens.toLocaleString('en-US')}`);
+	lines.push(`  Cached tokens: ${stats.cachedTokens.toLocaleString('en-US')}`);
+
+	const message = lines.join('\n');
+
+	const selection = await vscode.window.showInformationMessage(
+		message,
+		{ modal: false },
+		'Open details',
+		'Refresh',
+		'Open Kimi Console',
+		'Reset local stats',
 	);
 
-	quickPick.items = items;
+	if (!selection) return;
 
-	quickPick.onDidAccept(async () => {
-		const selected = quickPick.selectedItems[0];
-		quickPick.dispose();
-
-		if (!selected) return;
-
-		if (selected.label.includes('Open detailed usage panel')) {
+	switch (selection) {
+		case 'Open details':
 			showUsageDetailsPanel(
 				context,
 				usageTracker,
 				() => vscode.commands.executeCommand('kimi-copilot.refreshQuota'),
 				() => vscode.commands.executeCommand('kimi-copilot.openKimiConsole'),
 			);
-		} else if (selected.label.includes('Refresh quota')) {
+			break;
+		case 'Refresh':
 			await vscode.commands.executeCommand('kimi-copilot.refreshQuota');
-			showUsageQuickPick(context, usageTracker);
-		} else if (selected.label.includes('Open Kimi Console')) {
+			await showUsageQuickPick(context, usageTracker);
+			break;
+		case 'Open Kimi Console':
 			await vscode.commands.executeCommand('kimi-copilot.openKimiConsole');
-		} else if (selected.label.includes('Reset local statistics')) {
+			break;
+		case 'Reset local stats': {
 			const answer = await vscode.window.showWarningMessage(
 				'Reset local Kimi Copilot usage statistics?',
 				{ modal: true },
@@ -102,9 +91,7 @@ export function showUsageQuickPick(
 			if (answer === 'Reset') {
 				usageTracker.reset();
 			}
+			break;
 		}
-	});
-
-	quickPick.onDidHide(() => quickPick.dispose());
-	quickPick.show();
+	}
 }

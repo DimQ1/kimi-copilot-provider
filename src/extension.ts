@@ -256,8 +256,8 @@ function registerCommands(
             }
         }),
 
-        vscode.commands.registerCommand('kimi-copilot.showUsagePopup', () => {
-            showUsageQuickPick(context, usageTracker);
+        vscode.commands.registerCommand('kimi-copilot.showUsagePopup', async () => {
+            await showUsageQuickPick(context, usageTracker);
         }),
 
         vscode.commands.registerCommand('kimi-copilot.showUsageStats', () => {

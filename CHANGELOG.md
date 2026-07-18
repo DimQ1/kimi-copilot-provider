@@ -20,9 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.5.2] - 2026-07-18
 
 ### Changed
-- Status-bar click now opens a compact usage **popup** (QuickPick) with quota summary and quick actions instead of opening the full editor panel immediately.
-- Added "Open detailed usage panel" action in the popup to open the rich editor view.
-- The existing `Kimi Copilot: Show Usage Statistics` command still opens the detailed editor panel directly.
+- Status-bar click now opens a standard VS Code notification popup with the usage summary and action buttons.
+- Replaced the QuickPick usage popup with a clearer notification layout: each quota/limit is shown on its own line with an ASCII progress bar, used/remaining counts, and reset time.
+- Local token statistics are listed per metric (requests, prompt, completion, total, cached) for easier reading.
+- Added "Open details" button in the popup to open the rich editor usage panel.
 
 ## [1.5.1] - 2026-07-18
 
