@@ -2,6 +2,18 @@
  * Shared types for the Kimi Copilot extension.
  */
 
+// ---- Cost/pricing metadata (mirrors DeepSeek's shape for Copilot Chat UI) ----
+
+export type PricingCurrency = 'USD' | 'CNY';
+
+export type PriceCategory = 'low' | 'medium' | 'high' | 'very_high';
+
+export interface ModelPricing {
+	cacheHitInput: number;
+	cacheMissInput: number;
+	output: number;
+}
+
 // ---- API request/response types ----
 
 export interface KimiMessage {
@@ -161,6 +173,10 @@ export interface ModelDefinition {
 	defaults?: ModelDefaults;
 	/** API contract family for request construction. */
 	requestPolicy: 'k2' | 'k3';
+	/** Optional per-1M-token pricing metadata for the Copilot Chat picker cost panel. */
+	pricing?: Readonly<Record<PricingCurrency, ModelPricing>>;
+	/** Optional price tier label (low/medium/high/very_high). */
+	priceCategory?: PriceCategory;
 }
 
 export interface KimiModelsResponse {
@@ -169,3 +185,44 @@ export interface KimiModelsResponse {
 		object: string;
 	}>;
 }
+
+// ---- Kimi Code managed usage quota types ----
+
+/** A single quota row (e.g. weekly limit, 5-hour limit). */
+export interface KimiUsageRow {
+	label: string;
+	used: number;
+	limit: number;
+	resetHint?: string;
+}
+
+/** Extra Usage / Booster wallet balance. */
+export interface KimiBoosterWallet {
+	/** Remaining balance in whole cents. */
+	balanceCents: number;
+	/** Total balance in whole cents. */
+	totalCents: number;
+	/** Whether the user enabled a monthly spending cap. */
+	monthlyChargeLimitEnabled: boolean;
+	/** Monthly spending cap in whole cents; 0 means unlimited. */
+	monthlyChargeLimitCents: number;
+	/** Monthly spend so far in whole cents. */
+	monthlyUsedCents: number;
+	/** ISO currency code, e.g. USD / CNY. */
+	currency: string;
+}
+
+/** Parsed response from the Kimi Code `/usages` endpoint. */
+export interface KimiManagedUsage {
+	/** Summary quota (usually the weekly limit). */
+	summary: KimiUsageRow | null;
+	/** Additional per-window limits (e.g. 5-hour rate limit). */
+	limits: KimiUsageRow[];
+	/** Extra Usage balance, if enabled. */
+	extraUsage: KimiBoosterWallet | null;
+}
+
+/** Result of fetching managed usage from Kimi Code. */
+export type KimiManagedUsageResult =
+	| { kind: 'ok'; usage: KimiManagedUsage }
+	| { kind: 'error'; status?: number; message: string };

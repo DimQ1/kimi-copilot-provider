@@ -1,7 +1,7 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
-import { buildKimiRequest, convertMessages, convertTools, extractTextContent } from '../provider';
-import { MODELS } from '../models';
+import { buildKimiRequest, convertMessages, convertTools, extractTextContent, resolveReasoningEffort } from '../provider';
+import { MODELS, toChatInfo } from '../models';
 import type { KimiTool } from '../types';
 
 suite('provider helpers', () => {
@@ -10,7 +10,7 @@ suite('provider helpers', () => {
             const model = MODELS.find((item) => item.id === 'kimi-k3');
             assert.ok(model);
             assert.strictEqual(model.requestPolicy, 'k3');
-            assert.strictEqual(model.maxInputTokens, 262144);
+            assert.strictEqual(model.maxInputTokens, 1048576);
             assert.strictEqual(model.maxOutputTokens, 131072);
             assert.strictEqual(model.capabilities.imageInput, true);
             assert.strictEqual(model.defaults?.reasoningEffort, 'max');
@@ -38,6 +38,65 @@ suite('provider helpers', () => {
             assert.strictEqual('top_p' in request, false);
             assert.strictEqual('presence_penalty' in request, false);
             assert.strictEqual('frequency_penalty' in request, false);
+        });
+
+        test('uses reasoning effort from Copilot Chat UI options', () => {
+            const request = buildKimiRequest({
+                model: 'kimi-k3',
+                messages: [{ role: 'user', content: 'hello' }],
+                stream: true,
+                requestPolicy: 'k3',
+                maxTokens: 131072,
+                temperature: 1,
+                topP: 0.95,
+                presencePenalty: 0,
+                frequencyPenalty: 0,
+                thinking: { type: 'enabled' },
+                reasoningEffort: resolveReasoningEffort({ reasoning_effort: 'high' }, undefined, {}),
+            });
+
+            assert.strictEqual(request.reasoning_effort, 'high');
+        });
+
+        test('maps UI reasoning effort values to Kimi values', () => {
+            assert.strictEqual(resolveReasoningEffort({ reasoning_effort: 'none' }, undefined, {}), 'low');
+            assert.strictEqual(resolveReasoningEffort({ reasoning_effort: 'low' }, undefined, {}), 'low');
+            assert.strictEqual(resolveReasoningEffort({ reasoning_effort: 'medium' }, undefined, {}), 'high');
+            assert.strictEqual(resolveReasoningEffort({ reasoning_effort: 'high' }, undefined, {}), 'high');
+            assert.strictEqual(resolveReasoningEffort({ reasoning_effort: 'max' }, undefined, {}), 'max');
+            assert.strictEqual(resolveReasoningEffort({ reasoning_effort: 'ultra' }, undefined, {}), 'max');
+            assert.strictEqual(resolveReasoningEffort(undefined, { reasoningEffort: 'high' }, {}), 'high');
+            assert.strictEqual(resolveReasoningEffort(undefined, undefined, { reasoningEffort: 'low' }), 'low');
+            assert.strictEqual(resolveReasoningEffort(undefined, undefined, {}), 'max');
+        });
+
+        test('exposes configurationSchema for Thinking Effort on K3', () => {
+            const info = toChatInfo(MODELS.find((m) => m.id === 'kimi-k3')!, true);
+            const schema = (info as unknown as { configurationSchema?: { properties?: { reasoningEffort?: { enum: string[] } } } }).configurationSchema;
+            assert.ok(schema);
+            assert.deepStrictEqual(schema!.properties!.reasoningEffort!.enum, ['low', 'high', 'max']);
+        });
+
+        test('does not expose configurationSchema for non-reasoning models', () => {
+            const info = toChatInfo(MODELS.find((m) => m.id === 'kimi-k2.7-code')!, true);
+            const schema = (info as unknown as { configurationSchema?: unknown }).configurationSchema;
+            assert.strictEqual(schema, undefined);
+        });
+
+        test('exposes pricing metadata for K3', () => {
+            const info = toChatInfo(MODELS.find((m) => m.id === 'kimi-k3')!, true);
+            assert.strictEqual(info.inputCost, '$3.00');
+            assert.strictEqual(info.outputCost, '$15.00');
+            assert.strictEqual(info.cacheCost, '$0.30');
+            assert.strictEqual(info.priceCategory, 'medium');
+        });
+
+        test('exposes pricing metadata for K2.7 Code', () => {
+            const info = toChatInfo(MODELS.find((m) => m.id === 'kimi-k2.7-code')!, true);
+            assert.strictEqual(info.inputCost, '$0.95');
+            assert.strictEqual(info.outputCost, '$4.00');
+            assert.strictEqual(info.cacheCost, '$0.19');
+            assert.strictEqual(info.priceCategory, 'low');
         });
     });
 

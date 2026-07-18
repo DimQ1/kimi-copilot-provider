@@ -2,7 +2,7 @@
   "name": "kimi-copilot-provider",
   "displayName": "Kimi Copilot Provider",
   "description": "Use Kimi K3 and K2.x models as custom language model providers for GitHub Copilot Chat",
-  "version": "1.4.5",
+  "version": "1.5.0",
   "publisher": "kimi-ext",
   "license": "MIT",
   "icon": "icon.png",
@@ -62,6 +62,16 @@
       {
         "command": "kimi-copilot.showUsageStats",
         "title": "Show Usage Statistics",
+        "category": "Kimi Copilot"
+      },
+      {
+        "command": "kimi-copilot.refreshQuota",
+        "title": "Refresh Quota",
+        "category": "Kimi Copilot"
+      },
+      {
+        "command": "kimi-copilot.openKimiConsole",
+        "title": "Open Kimi Console",
         "category": "Kimi Copilot"
       },
       {
@@ -248,8 +258,10 @@
     "watch": "tsc -watch -p ./",
     "lint": "eslint src",
     "format": "prettier --write src",
-    "test": "vscode-test"
-  },
+    "test": "vscode-test",
+    "test:stable": "vscode-test",
+    "test:insiders": "cross-env VSCODE_TEST_VERSION=insiders vscode-test",
+    "test:clean": "node -e \"const fs=require('fs');const p='.vscode-test';if(fs.existsSync(p)){fs.rmSync(p,{recursive:true,force:true});console.log('Cleared '+p)}\" && npm run compile && npm run test"  },
   "overrides": {
     "diff": "8.0.3",
     "serialize-javascript": "7.0.5"
@@ -260,6 +272,7 @@
     "@typescript-eslint/parser": "^8.0.0",
     "@vscode/test-cli": "^0.0.15",
     "@vscode/test-electron": "^2.4.1",
+    "cross-env": "^7.0.3",
     "eslint": "^9.0.0",
     "prettier": "^3.3.0",
     "typescript": "^5.4.0",

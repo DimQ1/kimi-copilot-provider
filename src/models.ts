@@ -11,8 +11,8 @@ export const MODELS: ModelDefinition[] = [
 		name: 'Kimi K3',
 		family: 'kimi',
 		version: 'kimi-k3',
-		detail: 'Flagship model (256K context on Moderato, 1M on Allegretto+, native vision, reasoning effort)',
-		maxInputTokens: 262144,
+		detail: 'Flagship model (up to 1M context on Allegretto+, 256K on Moderato, native vision, reasoning effort)',
+		maxInputTokens: 1048576,
 		maxOutputTokens: 131072,
 		capabilities: {
 			toolCalling: true,
@@ -24,6 +24,11 @@ export const MODELS: ModelDefinition[] = [
 			reasoningEffort: 'max',
 			requestPolicy: 'k3',
 		},
+		pricing: {
+			USD: { cacheHitInput: 0.30, cacheMissInput: 3.00, output: 15.00 },
+			CNY: { cacheHitInput: 2.10, cacheMissInput: 21.00, output: 105.00 },
+		},
+		priceCategory: 'medium',
 	},
 	{
 		id: 'kimi-k2.7-code',
@@ -44,6 +49,11 @@ export const MODELS: ModelDefinition[] = [
 			topP: 0.95,
 			thinking: { type: 'enabled' },
 		},
+		pricing: {
+			USD: { cacheHitInput: 0.19, cacheMissInput: 0.95, output: 4.00 },
+			CNY: { cacheHitInput: 1.33, cacheMissInput: 6.65, output: 28.00 },
+		},
+		priceCategory: 'low',
 	},
 	{
 		id: 'kimi-k2.7-code-highspeed',
@@ -64,6 +74,11 @@ export const MODELS: ModelDefinition[] = [
 			topP: 0.95,
 			thinking: { type: 'enabled' },
 		},
+		pricing: {
+			USD: { cacheHitInput: 0.38, cacheMissInput: 1.90, output: 8.00 },
+			CNY: { cacheHitInput: 2.66, cacheMissInput: 13.30, output: 56.00 },
+		},
+		priceCategory: 'low',
 	},
 	{
 		id: 'kimi-k2.6',
@@ -84,6 +99,11 @@ export const MODELS: ModelDefinition[] = [
 			topP: 0.95,
 			thinking: { type: 'enabled' },
 		},
+		pricing: {
+			USD: { cacheHitInput: 0.16, cacheMissInput: 0.95, output: 4.00 },
+			CNY: { cacheHitInput: 1.12, cacheMissInput: 6.65, output: 28.00 },
+		},
+		priceCategory: 'low',
 	},
 	{
 		id: 'kimi-k2.5',
@@ -104,6 +124,7 @@ export const MODELS: ModelDefinition[] = [
 			topP: 1.0,
 			thinking: { type: 'enabled' },
 		},
+		priceCategory: 'low',
 	},
 ];
 
@@ -121,6 +142,12 @@ interface ModelPickerChatInformation extends vscode.LanguageModelChatInformation
 	readonly isUserSelectable: boolean;
 	readonly isBYOK: true;
 	readonly statusIcon?: vscode.ThemeIcon;
+	readonly configurationSchema?: vscode.LanguageModelConfigurationSchema;
+	readonly inputCost?: string;
+	readonly outputCost?: string;
+	readonly cacheCost?: string;
+	readonly priceCategory?: import('./types').PriceCategory;
+	readonly multiplierNumeric?: number;
 }
 
 export function toChatInfo(
@@ -130,7 +157,11 @@ export function toChatInfo(
 ): ModelPickerChatInformation {
 	const maxInputTokens = overrides?.maxInputTokens ?? m.maxInputTokens;
 	const maxOutputTokens = overrides?.maxOutputTokens ?? m.maxOutputTokens;
-	return {
+
+	const supportsReasoningEffort = m.capabilities.thinking && m.defaults?.reasoningEffort !== undefined;
+	const reasoningLevels: string[] = supportsReasoningEffort ? ['low', 'high', 'max'] : [];
+
+	const info: ModelPickerChatInformation = {
 		id: m.id,
 		name: m.name,
 		family: m.family,
@@ -146,6 +177,63 @@ export function toChatInfo(
 			toolCalling: m.capabilities.toolCalling,
 			imageInput: m.capabilities.imageInput,
 		},
+		...toModelCostInfo(m),
+	};
+
+	if (reasoningLevels.length > 0) {
+		Object.assign(info, {
+			configurationSchema: {
+				properties: {
+					reasoningEffort: buildReasoningEffortSchemaProperty(reasoningLevels),
+				},
+			},
+		});
+	}
+
+	return info;
+}
+
+function toModelCostInfo(m: ModelDefinition): { inputCost?: string; outputCost?: string; cacheCost?: string; priceCategory?: import('./types').PriceCategory } {
+	const pricing = m.pricing?.USD;
+	if (!pricing) {
+		return { priceCategory: m.priceCategory };
+	}
+	return {
+		inputCost: formatPriceValue(pricing.cacheMissInput),
+		outputCost: formatPriceValue(pricing.output),
+		cacheCost: formatPriceValue(pricing.cacheHitInput),
+		priceCategory: m.priceCategory,
+	};
+}
+
+function formatPriceValue(value: number): string {
+	return `$${value.toFixed(2)}`;
+}
+
+function buildReasoningEffortSchemaProperty(
+	effortLevels: readonly string[],
+): NonNullable<vscode.LanguageModelConfigurationSchema['properties']>[string] {
+	const labels: Record<string, string> = {
+		low: 'Low',
+		medium: 'Medium',
+		high: 'High',
+		max: 'Max',
+	};
+	const descriptions: Record<string, string> = {
+		low: 'Faster responses with less reasoning',
+		medium: 'Balanced reasoning and speed',
+		high: 'Greater reasoning depth but slower',
+		max: 'Absolute maximum capability with no constraints',
+	};
+	const defaultLevel = effortLevels.includes('high') ? 'high' : effortLevels[0];
+	return {
+		type: 'string',
+		title: 'Thinking Effort',
+		enum: effortLevels,
+		enumItemLabels: effortLevels.map((level) => labels[level] ?? level.charAt(0).toUpperCase() + level.slice(1)),
+		enumDescriptions: effortLevels.map((level) => descriptions[level] ?? level),
+		default: defaultLevel,
+		group: 'navigation',
 	};
 }
 

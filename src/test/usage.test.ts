@@ -1,6 +1,7 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
 import { UsageTracker, hasUsage, type UsageStats } from '../usage';
+import type { KimiManagedUsage } from '../types';
 
 class FakeMemento implements vscode.Memento {
 	private readonly storage = new Map<string, unknown>();
@@ -110,6 +111,37 @@ suite('UsageTracker', () => {
 		const text = tracker.getStatusBarText();
 		assert.ok(text.includes('1.5k'));
 		assert.ok(text.includes('1 req'));
+	});
+
+	test('setQuota updates status bar text and persists', async () => {
+		const tracker = new UsageTracker(memento);
+		tracker.setQuota({
+			summary: { label: 'Weekly limit', used: 41, limit: 100, resetHint: 'resets in 6d' },
+			limits: [],
+			extraUsage: null,
+		});
+		await new Promise((resolve) => setTimeout(resolve, 10));
+
+		assert.strictEqual(tracker.getStatusBarText(), '$(graph) 41% used (59 left)');
+		const saved = memento.get<KimiManagedUsage>('kimiCopilot.lastQuota');
+		assert.ok(saved);
+		assert.strictEqual(saved!.summary?.used, 41);
+	});
+
+	test('getHighestQuotaUsage returns the highest ratio', () => {
+		const tracker = new UsageTracker(memento);
+		tracker.setQuota({
+			summary: { label: 'Weekly limit', used: 50, limit: 100 },
+			limits: [
+				{ label: 'Hourly limit', used: 90, limit: 100 },
+			],
+			extraUsage: null,
+		});
+
+		const highest = tracker.getHighestQuotaUsage();
+		assert.ok(highest);
+		assert.strictEqual(highest!.row.label, 'Hourly limit');
+		assert.strictEqual(highest!.ratio, 0.9);
 	});
 });
 

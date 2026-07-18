@@ -2,11 +2,17 @@ import * as vscode from 'vscode';
 import { ConfigurationManager } from './config';
 import { KimiChatProvider } from './provider';
 import { UsageTracker } from './usage';
+import { KimiUsageClient } from './usage-client';
+
+const QUOTA_REFRESH_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
+const QUOTA_WARNING_THRESHOLD = 0.8;
+const QUOTA_CRITICAL_THRESHOLD = 0.95;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
     const configManager = new ConfigurationManager(context.secrets);
     const usageTracker = new UsageTracker(context.globalState);
     const provider = new KimiChatProvider(configManager, usageTracker);
+    const usageClient = new KimiUsageClient();
 
     context.subscriptions.push(
         vscode.lm.registerLanguageModelChatProvider('kimi-copilot', provider),
@@ -29,7 +35,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         }),
     );
 
-    registerCommands(context, configManager, provider, usageTracker);
+    registerCommands(context, configManager, provider, usageTracker, usageClient);
+    startQuotaRefresh(context, configManager, usageTracker, usageClient);
 
     // Copilot Chat may serve cached model info. Activate it first so the
     // refresh reaches a live listener and re-queries the provider.
@@ -42,11 +49,92 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     provider.refreshModelPicker();
 }
 
+function startQuotaRefresh(
+    context: vscode.ExtensionContext,
+    configManager: ConfigurationManager,
+    usageTracker: UsageTracker,
+    usageClient: KimiUsageClient,
+): void {
+    const refresh = async (): Promise<void> => {
+        const apiKey = await configManager.getApiKey();
+        if (!apiKey) {
+            usageTracker.setQuota(null, 'API key not set');
+            return;
+        }
+        try {
+            const result = await usageClient.fetchUsage(apiKey);
+            if (result.kind === 'ok') {
+                usageTracker.setQuota(result.usage, null);
+                notifyQuotaThresholds(usageTracker);
+            } else {
+                usageTracker.setQuota(null, result.message);
+            }
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            usageTracker.setQuota(null, message);
+        }
+    };
+
+    // Refresh immediately on activation, then periodically.
+    void refresh();
+    const timer = setInterval(refresh, QUOTA_REFRESH_INTERVAL_MS);
+    context.subscriptions.push(
+        new vscode.Disposable(() => clearInterval(timer)),
+    );
+
+    // Also refresh when the API key changes.
+    context.subscriptions.push(
+        vscode.workspace.onDidChangeConfiguration(async (event) => {
+            if (event.affectsConfiguration('kimiCopilot')) {
+                void refresh();
+            }
+        }),
+    );
+}
+
+let lastQuotaNotification: { ratio: number; level: 'warning' | 'critical' } | null = null;
+
+function notifyQuotaThresholds(usageTracker: UsageTracker): void {
+    const highest = usageTracker.getHighestQuotaUsage();
+    if (!highest) return;
+
+    const { row, ratio } = highest;
+    let level: 'warning' | 'critical' | null = null;
+    if (ratio >= QUOTA_CRITICAL_THRESHOLD) {
+        level = 'critical';
+    } else if (ratio >= QUOTA_WARNING_THRESHOLD) {
+        level = 'warning';
+    }
+
+    if (!level) {
+        lastQuotaNotification = null;
+        return;
+    }
+
+    if (lastQuotaNotification && lastQuotaNotification.level === level && lastQuotaNotification.ratio >= ratio) {
+        return;
+    }
+    lastQuotaNotification = { ratio, level };
+
+    const percent = Math.round(ratio * 100);
+    const message = `Kimi Copilot ${row.label.toLowerCase()} is at ${percent}% (${row.used}/${row.limit}).`;
+    if (level === 'critical') {
+        void vscode.window.showErrorMessage(message, 'Open Kimi Console').then((selection) => {
+            if (selection === 'Open Kimi Console') {
+                void vscode.env.openExternal(vscode.Uri.parse('https://platform.kimi.ai/console'));
+            }
+        });
+    } else {
+        void vscode.window.showWarningMessage(message);
+    }
+}
+
 function registerCommands(
     context: vscode.ExtensionContext,
     configManager: ConfigurationManager,
     provider: KimiChatProvider,
     usageTracker: UsageTracker,
+    usageClient: KimiUsageClient,
 ): void {
     context.subscriptions.push(
         vscode.commands.registerCommand('kimi-copilot.setApiKey', async () => {
@@ -166,9 +254,29 @@ function registerCommands(
             }
         }),
 
-        vscode.commands.registerCommand('kimi-copilot.showUsageStats', () => {
+        vscode.commands.registerCommand('kimi-copilot.showUsageStats', async () => {
             const stats = usageTracker.getFormattedStats();
             vscode.window.showInformationMessage(`Kimi Copilot usage: ${stats}`);
+        }),
+
+        vscode.commands.registerCommand('kimi-copilot.refreshQuota', async () => {
+            const apiKey = await configManager.getApiKey();
+            if (!apiKey) {
+                vscode.window.showErrorMessage('Kimi API key is not set. Run "Kimi Copilot: Set API Key".');
+                return;
+            }
+            const result = await usageClient.fetchUsage(apiKey);
+            if (result.kind === 'ok') {
+                usageTracker.setQuota(result.usage, null);
+                vscode.window.showInformationMessage('Kimi Copilot quota refreshed.');
+            } else {
+                usageTracker.setQuota(null, result.message);
+                vscode.window.showErrorMessage(result.message);
+            }
+        }),
+
+        vscode.commands.registerCommand('kimi-copilot.openKimiConsole', () => {
+            void vscode.env.openExternal(vscode.Uri.parse('https://platform.kimi.ai/console'));
         }),
 
         vscode.commands.registerCommand('kimi-copilot.resetUsageStats', async () => {

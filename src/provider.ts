@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import { ConfigurationManager } from './config';
 import { MODELS, toChatInfo, getModelCapabilities, getMaxOutputTokens, getModelDefaults, findModelById } from './models';
 import { UsageTracker, hasUsage } from './usage';
-import type { KimiContentPart, KimiMessage, KimiTool, KimiToolCall, KimiRequest, KimiStreamChunk } from './types';
+import type { KimiContentPart, KimiMessage, KimiTool, KimiToolCall, KimiRequest, KimiStreamChunk, ModelDefaults, ModelConfigOverride } from './types';
 
 // ═══════════════════════════════════════════════════════════════════════
 // Constants
@@ -140,7 +140,7 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
             modelConfig.thinking ??
             this.configManager.getThinking(modelInfo.id) ??
             modelDefaults?.thinking;
-        const reasoningEffort = modelConfig.reasoningEffort ?? modelDefaults?.reasoningEffort;
+        const reasoningEffort = resolveReasoningEffortFromOptions(options, modelDefaults, modelConfig);
 
         const maxTokensSetting = this.configManager.getMaxTokens(modelInfo.id);
         const maxOutputTokens = modelConfig.maxOutputTokens ?? getMaxOutputTokens(modelInfo.id);
@@ -472,6 +472,65 @@ function isLanguageModelDataPart(
     part: unknown,
 ): part is vscode.LanguageModelDataPart {
     return typeof vscode.LanguageModelDataPart !== 'undefined' && part instanceof vscode.LanguageModelDataPart;
+}
+
+/**
+ * Resolves the effective reasoning effort for a request.
+ * Precedence: Copilot Chat UI options > per-model config > model default.
+ * Maps common UI values to Kimi K3's accepted low/high/max values.
+ */
+export function resolveReasoningEffort(
+    modelOptions: { readonly [name: string]: unknown } | undefined,
+    modelDefaults: ModelDefaults | undefined,
+    modelConfig: ModelConfigOverride,
+): 'low' | 'high' | 'max' {
+    const raw =
+        modelOptions?.reasoning_effort ??
+        modelOptions?.reasoningEffort ??
+        modelConfig.reasoningEffort ??
+        modelDefaults?.reasoningEffort ??
+        'max';
+
+    switch (String(raw).toLowerCase()) {
+        case 'low':
+        case 'minimum':
+        case 'light':
+        case 'none':
+            return 'low';
+        case 'medium':
+        case 'normal':
+            return 'high';
+        case 'high':
+            return 'high';
+        case 'max':
+        case 'ultra':
+        case 'xhigh':
+        case 'maximum':
+            return 'max';
+        default:
+            return 'max';
+    }
+}
+
+export function resolveReasoningEffortFromOptions(
+    options: vscode.ProvideLanguageModelChatResponseOptions,
+    modelDefaults: ModelDefaults | undefined,
+    modelConfig: ModelConfigOverride,
+): 'low' | 'high' | 'max' {
+    // Copilot Chat passes user-selected configuration values (e.g. from the
+    // Thinking Effort picker) through `modelConfiguration` or `configuration`.
+    const extendedOptions = options as unknown as {
+        modelConfiguration?: { readonly [key: string]: unknown };
+        configuration?: { readonly [key: string]: unknown };
+    };
+    const configured =
+        extendedOptions.modelConfiguration?.reasoningEffort ??
+        extendedOptions.configuration?.reasoningEffort;
+    return resolveReasoningEffort(
+        configured !== undefined ? { reasoningEffort: configured } : options.modelOptions,
+        modelDefaults,
+        modelConfig,
+    );
 }
 
 export function buildKimiRequest(options: {

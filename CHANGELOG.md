@@ -17,7 +17,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Restored default `maxInputTokens` for `kimi-k3` to 1048576 (1M) to match the Kimi K3 up-to-1M context window. Users on the Moderato plan can lower it to 262144 via `kimiCopilot.modelConfigs`.
+- Added support for Copilot Chat's **Thinking Effort** UI option for `kimi-k3`. Values from the UI (`modelOptions.reasoning_effort` or proposed `modelConfiguration.reasoningEffort`) are now mapped to Kimi's `low`/`high`/`max` and sent to the API, taking precedence over model defaults and per-model config.
+
 ### Added
+- Added managed Kimi Code quota / usage tracking via the `/usages` endpoint. The status bar now shows the current quota percentage (e.g., `41% used (59 left)`) instead of local token counts, with a hover exposing the full breakdown and any limits.
+- Added `Kimi Copilot: Refresh Quota` command to fetch the latest usage on demand.
+- Added `Kimi Copilot: Open Kimi Console` command to jump to the Kimi platform console.
+- Added quota threshold notifications at 80% (warning) and 95% (critical) to warn before limits are reached.
+- Added per-model pricing metadata (`inputCost`, `outputCost`, `cacheCost`, `priceCategory`) to render the native Copilot Chat cost panel for Kimi models.
 - Added Kimi K3 support with up to 1M context, `reasoning_effort`, native image input conversion, and K3-specific request parameters.
 - Added a command to clear the stored API key and diagnostics for invalid credentials.
 - Added local usage statistics tracking (prompt/completion/total/cached tokens and request count) from Kimi API responses, shown in the status bar.
