@@ -2,7 +2,7 @@
   "name": "kimi-copilot-provider",
   "displayName": "Kimi Copilot Provider",
   "description": "Use Kimi K3 and K2.x models as custom language model providers for GitHub Copilot Chat",
-  "version": "1.5.2",
+  "version": "1.5.3",
   "publisher": "kimi-ext",
   "license": "MIT",
   "icon": "icon.png",
@@ -215,7 +215,7 @@
           "default": 0,
           "minimum": 0,
           "maximum": 1048576,
-          "description": "Maximum output tokens. K3 uses max_completion_tokens and supports up to 1048576. Set to 0 for model default."
+          "description": "Maximum output tokens per response. K3 uses max_completion_tokens. Typical agent maximum is 32768; set to 0 for model default."
         },
         "kimiCopilot.topP": {
           "type": "number",

@@ -11,9 +11,9 @@ export const MODELS: ModelDefinition[] = [
 		name: 'Kimi K3',
 		family: 'kimi',
 		version: 'kimi-k3',
-		detail: 'Flagship model (up to 1M context on Allegretto+, 256K on Moderato, native vision, reasoning effort)',
-		maxInputTokens: 1048576,
-		maxOutputTokens: 131072,
+		detail: 'Flagship model (1M context on Allegretto+, 256K on Moderato; per-request limit 262K, native vision, reasoning effort)',
+		maxInputTokens: 262144,
+		maxOutputTokens: 32768,
 		capabilities: {
 			toolCalling: true,
 			imageInput: true,
@@ -29,6 +29,8 @@ export const MODELS: ModelDefinition[] = [
 			CNY: { cacheHitInput: 2.10, cacheMissInput: 21.00, output: 105.00 },
 		},
 		priceCategory: 'medium',
+		singleRequestLimit: 262144,
+		multiTierContext: { default: 262144, allegretto: 1048576 },
 	},
 	{
 		id: 'kimi-k2.7-code',
@@ -148,6 +150,8 @@ interface ModelPickerChatInformation extends vscode.LanguageModelChatInformation
 	readonly cacheCost?: string;
 	readonly priceCategory?: import('./types').PriceCategory;
 	readonly multiplierNumeric?: number;
+	readonly singleRequestLimit?: number;
+	readonly multiTierContext?: { default: number; allegretto: number };
 }
 
 export function toChatInfo(
@@ -178,6 +182,8 @@ export function toChatInfo(
 			imageInput: m.capabilities.imageInput,
 		},
 		...toModelCostInfo(m),
+		singleRequestLimit: m.singleRequestLimit,
+		multiTierContext: m.multiTierContext,
 	};
 
 	if (reasoningLevels.length > 0) {

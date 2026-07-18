@@ -17,6 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.3] - 2026-07-18
+
+### Fixed
+- Reduced `kimi-k3` `maxInputTokens` to 262144 to match the Kimi Code API single-request limit (prompt + history + files). Allegretto+ users can still override to 1M via `kimiCopilot.modelConfigs`.
+- Reduced `kimi-k3` `maxOutputTokens` to 32768, aligning with the recommended coding-agent maximum.
+- Added `singleRequestLimit` and `multiTierContext` metadata to the K3 model definition for clearer limit reporting.
+
 ## [1.5.2] - 2026-07-18
 
 ### Changed

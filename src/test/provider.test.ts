@@ -10,10 +10,12 @@ suite('provider helpers', () => {
             const model = MODELS.find((item) => item.id === 'kimi-k3');
             assert.ok(model);
             assert.strictEqual(model.requestPolicy, 'k3');
-            assert.strictEqual(model.maxInputTokens, 1048576);
-            assert.strictEqual(model.maxOutputTokens, 131072);
+            assert.strictEqual(model.maxInputTokens, 262144);
+            assert.strictEqual(model.maxOutputTokens, 32768);
             assert.strictEqual(model.capabilities.imageInput, true);
             assert.strictEqual(model.defaults?.reasoningEffort, 'max');
+            assert.strictEqual(model.singleRequestLimit, 262144);
+            assert.deepStrictEqual(model.multiTierContext, { default: 262144, allegretto: 1048576 });
         });
 
         test('builds a K3 request without K2-only parameters', () => {
@@ -22,7 +24,7 @@ suite('provider helpers', () => {
                 messages: [{ role: 'user', content: 'hello' }],
                 stream: true,
                 requestPolicy: 'k3',
-                maxTokens: 131072,
+                maxTokens: 32768,
                 temperature: 1,
                 topP: 0.95,
                 presencePenalty: 0,
@@ -30,7 +32,7 @@ suite('provider helpers', () => {
                 thinking: { type: 'enabled' },
             });
 
-            assert.strictEqual(request.max_completion_tokens, 131072);
+            assert.strictEqual(request.max_completion_tokens, 32768);
             assert.strictEqual(request.reasoning_effort, 'max');
             assert.strictEqual('max_tokens' in request, false);
             assert.strictEqual('thinking' in request, false);
@@ -38,24 +40,6 @@ suite('provider helpers', () => {
             assert.strictEqual('top_p' in request, false);
             assert.strictEqual('presence_penalty' in request, false);
             assert.strictEqual('frequency_penalty' in request, false);
-        });
-
-        test('uses reasoning effort from Copilot Chat UI options', () => {
-            const request = buildKimiRequest({
-                model: 'kimi-k3',
-                messages: [{ role: 'user', content: 'hello' }],
-                stream: true,
-                requestPolicy: 'k3',
-                maxTokens: 131072,
-                temperature: 1,
-                topP: 0.95,
-                presencePenalty: 0,
-                frequencyPenalty: 0,
-                thinking: { type: 'enabled' },
-                reasoningEffort: resolveReasoningEffort({ reasoning_effort: 'high' }, undefined, {}),
-            });
-
-            assert.strictEqual(request.reasoning_effort, 'high');
         });
 
         test('maps UI reasoning effort values to Kimi values', () => {

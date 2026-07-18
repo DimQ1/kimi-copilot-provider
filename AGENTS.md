@@ -13,11 +13,11 @@ VS Code extension that registers **Kimi K2/K2.7 Code** models as custom `Languag
 
 ## Supported Models
 
-K3 uses `kimi-k3`, up to 1M context, `max_completion_tokens`, and `reasoning_effort`. It always has thinking enabled, omits K2.x fixed sampling parameters, and accepts image data as base64 content parts.
+K3 uses `kimi-k3`, up to 1M context, `max_completion_tokens`, and `reasoning_effort`. It always has thinking enabled, omits K2.x fixed sampling parameters, and accepts image data as base64 content parts. Note that while the model can support up to 1M context on higher tiers, the Kimi Code API rejects a single request that exceeds **262,144 tokens** (prompt + history + files).
 
 | Picker ID | API Model | Context | Notes |
 |---|---|---|---|
-| `kimi-k3` | `kimi-k3` | 256K default, 1M with Allegretto+ | Native vision, tool calling, reasoning effort |
+| `kimi-k3` | `kimi-k3` | 256K default, 1M with Allegretto+ | Native vision, tool calling, reasoning effort; **per-request limit is 262144 tokens** |
 | `kimi-k2.7-code` | `kimi-k2.7-code` | 256K | Default coding model, thinking required |
 | `kimi-k2.7-code-highspeed` | `kimi-k2.7-code-highspeed` | 256K | Faster output (~180 T/s) |
 | `kimi-k2.6` | `kimi-k2.6` | 256K | Multimodal + thinking |

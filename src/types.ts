@@ -177,6 +177,10 @@ export interface ModelDefinition {
 	pricing?: Readonly<Record<PricingCurrency, ModelPricing>>;
 	/** Optional price tier label (low/medium/high/very_high). */
 	priceCategory?: PriceCategory;
+	/** Optional hard per-request token limit (prompt + history + files). */
+	singleRequestLimit?: number;
+	/** Optional multi-tier context limits for higher subscription plans. */
+	multiTierContext?: { default: number; allegretto: number };
 }
 
 export interface KimiModelsResponse {
