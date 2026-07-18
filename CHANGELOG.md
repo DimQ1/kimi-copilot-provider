@@ -17,6 +17,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.1] - 2026-07-18
+
+### Added
+- Added a detailed usage panel that opens on status-bar click. It shows the Kimi Code quota with a progress bar, remaining credits, reset time, extra usage / booster wallet balance, and local token statistics.
+- Added Refresh Quota and Open Kimi Console buttons inside the usage panel.
+- Status-bar tooltip now indicates that clicking opens the detailed usage panel.
+
+## [1.5.0] - 2026-07-18
+
 ### Fixed
 - Restored default `maxInputTokens` for `kimi-k3` to 1048576 (1M) to match the Kimi K3 up-to-1M context window. Users on the Moderato plan can lower it to 262144 via `kimiCopilot.modelConfigs`.
 - Added support for Copilot Chat's **Thinking Effort** UI option for `kimi-k3`. Values from the UI (`modelOptions.reasoning_effort` or proposed `modelConfiguration.reasoningEffort`) are now mapped to Kimi's `low`/`high`/`max` and sent to the API, taking precedence over model defaults and per-model config.

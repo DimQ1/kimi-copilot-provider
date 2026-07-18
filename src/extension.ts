@@ -3,6 +3,7 @@ import { ConfigurationManager } from './config';
 import { KimiChatProvider } from './provider';
 import { UsageTracker } from './usage';
 import { KimiUsageClient } from './usage-client';
+import { showUsageDetailsPanel } from './usage-webview';
 
 const QUOTA_REFRESH_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
 const QUOTA_WARNING_THRESHOLD = 0.8;
@@ -24,7 +25,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         100,
     );
     statusBar.command = 'kimi-copilot.showUsageStats';
-    statusBar.tooltip = 'Kimi Copilot usage statistics';
+    statusBar.tooltip = new vscode.MarkdownString('Kimi Copilot usage statistics\n\nClick to open detailed usage panel.', true);
     statusBar.text = usageTracker.getStatusBarText();
     statusBar.show();
     context.subscriptions.push(statusBar);
@@ -254,9 +255,13 @@ function registerCommands(
             }
         }),
 
-        vscode.commands.registerCommand('kimi-copilot.showUsageStats', async () => {
-            const stats = usageTracker.getFormattedStats();
-            vscode.window.showInformationMessage(`Kimi Copilot usage: ${stats}`);
+        vscode.commands.registerCommand('kimi-copilot.showUsageStats', () => {
+            showUsageDetailsPanel(
+                context,
+                usageTracker,
+                () => vscode.commands.executeCommand('kimi-copilot.refreshQuota'),
+                () => vscode.commands.executeCommand('kimi-copilot.openKimiConsole'),
+            );
         }),
 
         vscode.commands.registerCommand('kimi-copilot.refreshQuota', async () => {
