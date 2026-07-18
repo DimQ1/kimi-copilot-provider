@@ -17,6 +17,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.5] - 2026-07-18
+
+### Added
+- Added referral links to the README and extension description so new users can subscribe or sign up on Kimi and both sides receive up to 1-Year Membership Credits.
+
+## [1.5.4] - 2026-07-18
+
+### Added
+- Added `SessionContextTracker` that estimates the token size of the current chat session (history + prompt + files + images) before sending a request.
+- Context usage is shown in the status bar as a percentage (e.g. `Ctx 45%`).
+- Added `kimiCopilot.contextWarningThreshold` (default 0.8) and `kimiCopilot.contextErrorThreshold` (default 0.95) settings.
+- When the context error threshold is exceeded, the request is rejected with a clear message telling the user to start a new session, run `/compact`, or remove files from the context.
+- Added `kimiCopilot.plan` setting (`moderato`/`allegretto`/`allegro`/`vivace`) so K3 can use the higher 1M context window on Allegretto+ while still enforcing the 262144 single-request limit.
+- Added unit tests for the session context tracker.
+
+### Changed
+- The status bar now shows context usage alongside the existing quota/token summary.
+- The usage tooltip and usage panel include the current context estimate when available.
+
 ## [1.5.3] - 2026-07-18
 
 ### Fixed

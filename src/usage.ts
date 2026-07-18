@@ -18,6 +18,13 @@ export interface UsageStats {
 	cachedTokens: number;
 }
 
+export interface ContextStats {
+	tokens: number;
+	limit: number;
+	ratio: number;
+	status: 'ok' | 'warning' | 'critical' | 'exceeded';
+}
+
 const DEFAULT_STATS: UsageStats = {
 	requestCount: 0,
 	promptTokens: 0,
@@ -30,6 +37,7 @@ export class UsageTracker {
 	private stats: UsageStats;
 	private quota: KimiManagedUsage | null;
 	private quotaError: string | null;
+	private contextStats: ContextStats | null;
 	private readonly _onDidChange = new vscode.EventEmitter<void>();
 	readonly onDidChange = this._onDidChange.event;
 
@@ -37,6 +45,7 @@ export class UsageTracker {
 		this.stats = this.loadStats();
 		this.quota = this.loadQuota();
 		this.quotaError = null;
+		this.contextStats = null;
 	}
 
 	/** Adds a single response usage to the running totals. */
@@ -82,13 +91,34 @@ export class UsageTracker {
 		this.stats = { ...DEFAULT_STATS };
 		this.quota = null;
 		this.quotaError = null;
+		this.contextStats = null;
 		void this.saveStats();
 		void this.saveQuota();
 		this._onDidChange.fire();
 	}
 
+	/** Stores the latest context estimate for the active chat session. */
+	setContextStats(stats: ContextStats | null): void {
+		this.contextStats = stats;
+		this._onDidChange.fire();
+	}
+
+	getContextStats(): ContextStats | null {
+		return this.contextStats;
+	}
+
 	/** One-line summary for the status bar. */
 	getStatusBarText(): string {
+		if (this.contextStats) {
+			const { ratio, status } = this.contextStats;
+			const percent = Math.round(ratio * 100);
+			const icon = status === 'exceeded' || status === 'critical' ? '$(warning)' : '$(info)';
+			return `${icon} Ctx ${percent}% · ${this.getQuotaOrTokenSummary()}`;
+		}
+		return this.getQuotaOrTokenSummary();
+	}
+
+	private getQuotaOrTokenSummary(): string {
 		const summary = this.quota?.summary;
 		if (summary && summary.limit > 0) {
 			const percent = Math.round((summary.used / summary.limit) * 100);
@@ -107,6 +137,11 @@ export class UsageTracker {
 			`Total tokens: ${this.formatNumber(this.stats.totalTokens)}`,
 			`Cached tokens: ${this.formatNumber(this.stats.cachedTokens)}`,
 		];
+		if (this.contextStats) {
+			const { ratio, status } = this.contextStats;
+			const percent = Math.round(ratio * 100);
+			lines.push(`Context: ${this.formatNumber(this.contextStats.tokens)}/${this.formatNumber(this.contextStats.limit)} (${percent}% — ${status})`);
+		}
 		const summary = this.quota?.summary;
 		if (summary && summary.limit > 0) {
 			const percent = Math.round((summary.used / summary.limit) * 100);

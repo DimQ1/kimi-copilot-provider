@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { ConfigurationManager } from './config';
+import { SessionContextTracker } from './context-tracker';
 import { MODELS, toChatInfo, getModelCapabilities, getMaxOutputTokens, getModelDefaults, findModelById } from './models';
 import { UsageTracker, hasUsage } from './usage';
 import type { KimiContentPart, KimiMessage, KimiTool, KimiToolCall, KimiRequest, KimiStreamChunk, ModelDefaults, ModelConfigOverride } from './types';
@@ -161,20 +162,48 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
             allMessages.unshift({ role: 'system', content: systemPrompt });
         }
 
+        // Estimate and guard against session context limits.
+        const tracker = new SessionContextTracker({
+            maxInputTokens: modelConfig.maxInputTokens ?? modelInfo.maxInputTokens,
+            singleRequestLimit: modelDefinition?.singleRequestLimit,
+            multiTierContext: modelDefinition?.multiTierContext,
+            warningThreshold: this.configManager.getContextWarningThreshold(),
+            errorThreshold: this.configManager.getContextErrorThreshold(),
+            plan: this.configManager.getPlan(),
+        });
+        const estimate = tracker.estimate(allMessages);
+        this.outputChannel.info(
+            `Context estimate: ~${estimate.tokens.toLocaleString('en-US')} / ${estimate.limit.toLocaleString('en-US')} tokens (${Math.round(estimate.ratio * 100)}%)`,
+        );
+        if (estimate.status === 'exceeded' || estimate.status === 'critical') {
+            const guidance = estimate.status === 'exceeded'
+                ? 'Start a new chat session, run "/compact", or remove files from the context.'
+                : 'The context is almost full. Consider starting a new chat session or running "/compact" soon.';
+            const planHint = modelDefinition?.multiTierContext
+                ? ' Allegretto+ users can configure up to 1M context via settings, but a single request still cannot exceed 262144 tokens.'
+                : '';
+            this.usageTracker.setContextStats(estimate);
+            throw new vscode.LanguageModelError(
+                `Kimi context ${estimate.status}: ~${estimate.tokens.toLocaleString('en-US')} / ${estimate.limit.toLocaleString('en-US')} tokens.${planHint}\n\n${guidance}`,
+            );
+        }
+
+        this.usageTracker.setContextStats(estimate);
+
         const request = buildKimiRequest({
             model: modelName,
             messages: allMessages,
             stream: enableStreaming,
-        includeUsage: enableStreaming,
-        requestPolicy,
-        maxTokens: extras?.testMode ? 1 : maxTokens,
-        temperature,
-        topP,
-        presencePenalty,
-        frequencyPenalty,
-        thinking,
-        reasoningEffort,
-    });
+            includeUsage: enableStreaming,
+            requestPolicy,
+            maxTokens: extras?.testMode ? 1 : maxTokens,
+            temperature,
+            topP,
+            presencePenalty,
+            frequencyPenalty,
+            thinking,
+            reasoningEffort,
+        });
 
         // Convert tools if the model supports tool calling
         const tools = convertTools(toolCallingEnabled, options.tools);

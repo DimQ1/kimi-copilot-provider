@@ -123,6 +123,13 @@ The extension tracks token usage reported by the Kimi API (prompt, completion, t
 - Node.js 18+
 - Active Kimi API key
 
+## Referral Links
+
+New to Kimi? Use these links to sign up or subscribe — you’ll get a guaranteed benefit and so will I (up to 1-Year Membership Credits):
+
+- **Subscribe:** [Boost me and we both win! Subscribe to Kimi and we each get a guaranteed benefit — up to 1-Year Membership Credits](https://kimi-bot.com/activities/viral-referral/share?scenario=subscribe&from=share_poster&invitation_code=ZKH245)
+- **Sign up:** [Boost me and we both win! Sign up on Kimi and we each get a guaranteed benefit — up to 1-Year Membership Credits](https://kimi-bot.com/activities/viral-referral/share?scenario=invite&from=share_poster&invitation_code=ZKH245)
+
 ## Official References
 
 - [Language Model Chat Provider API Guide](https://code.visualstudio.com/api/extension-guides/ai/language-model-chat-provider)

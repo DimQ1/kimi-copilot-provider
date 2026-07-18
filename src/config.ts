@@ -157,6 +157,21 @@ export class ConfigurationManager {
 		return this.config.get<boolean>('enableStreaming', true);
 	}
 
+	getContextWarningThreshold(): number {
+		const value = this.config.get<number>('contextWarningThreshold', 0.8);
+		return Math.max(0, Math.min(1, value));
+	}
+
+	getContextErrorThreshold(): number {
+		const value = this.config.get<number>('contextErrorThreshold', 0.95);
+		return Math.max(0, Math.min(1, value));
+	}
+
+	/** Optional user plan hint used to pick multi-tier context limits. */
+	getPlan(): string | undefined {
+		return this.config.get<string>('plan', '');
+	}
+
 	getSystemPrompt(modelId?: string): string {
 		if (modelId) {
 			const modelConfig = this.getModelConfig(modelId);
