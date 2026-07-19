@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
-import type { ModelDefinition, ModelCapabilities, ModelDefaults, ModelConfigOverride } from './types';
+import type { ModelDefinition, ModelCapabilities, ModelDefaults, ModelConfigOverride, KimiServerModelInfo } from './types';
+import { applyServerModels } from './models-client';
 
 // ═══════════════════════════════════════════════════════════════════════
 // Model Registry
@@ -243,18 +244,46 @@ function buildReasoningEffortSchemaProperty(
 	};
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// Dynamic registry — server catalog layered on top of MODELS
+// ═══════════════════════════════════════════════════════════════════════
+//
+// The hard-coded MODELS table above is the fallback. When the extension
+// successfully fetches GET /models with the user's API key, the returned
+// per-subscription parameters (context window, capabilities, effort
+// levels) are layered on top of it here, so every consumer of the helper
+// functions below sees the server-resolved values.
+
+let effectiveModels: ModelDefinition[] = MODELS;
+
+/**
+ * Replaces the effective registry with the server catalog merged over the
+ * hard-coded fallback. Pass `undefined` to restore the hard-coded table.
+ */
+export function applyServerModelCatalog(serverModels: readonly KimiServerModelInfo[] | undefined): void {
+	effectiveModels =
+		serverModels && serverModels.length > 0
+			? applyServerModels(MODELS, serverModels)
+			: MODELS;
+}
+
+/** The effective registry: hard-coded MODELS plus any server overrides. */
+export function getEffectiveModels(): readonly ModelDefinition[] {
+	return effectiveModels;
+}
+
 export function getModelCapabilities(modelId: string): ModelCapabilities | undefined {
-	return MODELS.find((m) => m.id === modelId)?.capabilities;
+	return effectiveModels.find((m) => m.id === modelId)?.capabilities;
 }
 
 export function getModelDefaults(modelId: string): ModelDefaults | undefined {
-	return MODELS.find((m) => m.id === modelId)?.defaults;
+	return effectiveModels.find((m) => m.id === modelId)?.defaults;
 }
 
 export function getMaxOutputTokens(modelId: string): number {
-	return MODELS.find((m) => m.id === modelId)?.maxOutputTokens ?? 32768;
+	return effectiveModels.find((m) => m.id === modelId)?.maxOutputTokens ?? 32768;
 }
 
 export function findModelById(modelId: string): ModelDefinition | undefined {
-	return MODELS.find((m) => m.id === modelId);
+	return effectiveModels.find((m) => m.id === modelId);
 }

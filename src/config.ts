@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import type { ModelConfigOverride } from './types';
+import type { ModelConfigOverride, KimiServerModelInfo } from './types';
 
 // ═══════════════════════════════════════════════════════════════════════
 // Configuration helpers — read extension settings at runtime.
@@ -9,14 +9,35 @@ import type { ModelConfigOverride } from './types';
 const CONFIG_SECTION = 'kimiCopilot';
 const API_KEY_SECRET_KEY = 'kimiCopilot.apiKey';
 
+/** globalState key holding the last successfully fetched /models catalog. */
+const MODELS_CACHE_KEY = 'kimiCopilot.serverModels';
+
 const DEFAULT_BASE_URL = 'https://api.kimi.com';
 const DEFAULT_ENDPOINT = 'https://api.kimi.com/coding/v1/chat/completions';
 
 export class ConfigurationManager {
-	constructor(private readonly secretStorage: vscode.SecretStorage) {}
+	constructor(
+		private readonly secretStorage: vscode.SecretStorage,
+		private readonly globalState?: vscode.Memento,
+	) {}
 
 	get config(): vscode.WorkspaceConfiguration {
 		return vscode.workspace.getConfiguration(CONFIG_SECTION);
+	}
+
+	/** Cached server model catalog (undefined when never fetched). */
+	getServerModels(): KimiServerModelInfo[] | undefined {
+		return this.globalState?.get<KimiServerModelInfo[]>(MODELS_CACHE_KEY);
+	}
+
+	/** Persists the server model catalog across restarts. */
+	async setServerModels(models: KimiServerModelInfo[]): Promise<void> {
+		await this.globalState?.update(MODELS_CACHE_KEY, models);
+	}
+
+	/** Removes the cached server model catalog (e.g. when the key is cleared). */
+	async clearServerModels(): Promise<void> {
+		await this.globalState?.update(MODELS_CACHE_KEY, undefined);
 	}
 
 	/** Returns the API key from SecretStorage, with plain-text fallback. */

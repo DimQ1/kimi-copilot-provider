@@ -190,6 +190,25 @@ export interface KimiModelsResponse {
 	}>;
 }
 
+// ---- Server model catalog types (GET /models) ----
+
+/** One model entry from the Kimi Code `/models` endpoint. */
+export interface KimiServerModelInfo {
+	/** API model id, e.g. `k3`, `kimi-for-coding`. */
+	id: string;
+	/** Context window in tokens, resolved per subscription. */
+	contextLength: number;
+	supportsReasoning: boolean;
+	supportsImageIn: boolean;
+	supportsVideoIn: boolean;
+	supportsToolUse: boolean;
+	displayName?: string;
+	/** Thinking effort levels the model accepts (from `think_efforts`). */
+	supportEfforts?: string[];
+	/** Server default thinking effort. */
+	defaultEffort?: string;
+}
+
 // ---- Kimi Code managed usage quota types ----
 
 /** A single quota row (e.g. weekly limit, 5-hour limit). */

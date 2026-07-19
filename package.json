@@ -2,7 +2,7 @@
   "name": "kimi-copilot-provider",
   "displayName": "Kimi Copilot Provider",
   "description": "Use Kimi K3 and K2.x models as custom language model providers for GitHub Copilot Chat. New to Kimi? Boost me and we both win — subscribe and each get up to 1-Year Membership Credits: https://kimi-bot.com/activities/viral-referral/share?scenario=subscribe&from=share_poster&invitation_code=ZKH245",
-  "version": "1.5.6",
+  "version": "1.5.7",
   "publisher": "kimi-ext",
   "license": "MIT",
   "icon": "icon.png",
@@ -292,7 +292,8 @@
     "test": "vscode-test",
     "test:stable": "vscode-test",
     "test:insiders": "cross-env VSCODE_TEST_VERSION=insiders vscode-test",
-    "test:clean": "node -e \"const fs=require('fs');const p='.vscode-test';if(fs.existsSync(p)){fs.rmSync(p,{recursive:true,force:true});console.log('Cleared '+p)}\" && npm run compile && npm run test"  },
+    "test:clean": "node -e \"const fs=require('fs');const p='.vscode-test';if(fs.existsSync(p)){fs.rmSync(p,{recursive:true,force:true});console.log('Cleared '+p)}\" && npm run compile && npm run test"
+  },
   "overrides": {
     "diff": "8.0.3",
     "serialize-javascript": "7.0.5"

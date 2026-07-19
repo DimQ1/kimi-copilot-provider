@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.7] - 2026-07-19
+
+### Added
+- The extension now fetches the live model catalog from the Kimi Code `GET /models` endpoint with the configured API key on startup (and after setting the API key). Server-returned parameters — context window (`context_length`), capability flags, and thinking effort levels — are layered over the hard-coded model registry, so per-subscription limits (e.g. K3 1M context on Allegretto+) apply automatically.
+- The fetched catalog is cached in `globalState` and re-applied on the next start; it is cleared when the API key is removed. On any fetch failure the extension silently falls back to the hard-coded/cached values (details in the "Kimi Copilot" log channel).
+
 ## [1.5.6] - 2026-07-18
 
 ### Fixed

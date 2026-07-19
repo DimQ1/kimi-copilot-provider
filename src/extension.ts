@@ -11,10 +11,15 @@ const QUOTA_WARNING_THRESHOLD = 0.8;
 const QUOTA_CRITICAL_THRESHOLD = 0.95;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
-    const configManager = new ConfigurationManager(context.secrets);
+    const configManager = new ConfigurationManager(context.secrets, context.globalState);
     const usageTracker = new UsageTracker(context.globalState);
     const provider = new KimiChatProvider(configManager, usageTracker);
     const usageClient = new KimiUsageClient();
+
+    // Layer the cached server catalog (from a previous session) over the
+    // hard-coded registry, then refresh it live with the API key.
+    provider.applyCachedServerModels();
+    void provider.refreshModelsFromServer();
 
     context.subscriptions.push(
         vscode.lm.registerLanguageModelChatProvider('kimi-copilot', provider),
@@ -157,12 +162,15 @@ function registerCommands(
             if (value !== undefined) {
                 await configManager.setApiKey(value);
                 provider.refreshModelPicker();
+                void provider.refreshModelsFromServer();
                 vscode.window.showInformationMessage('Kimi API key saved securely.');
             }
         }),
 
         vscode.commands.registerCommand('kimi-copilot.clearApiKey', async () => {
             await configManager.deleteApiKey();
+            await configManager.clearServerModels();
+            provider.applyCachedServerModels();
             provider.refreshModelPicker();
             vscode.window.showInformationMessage('Stored Kimi API key cleared.');
         }),

@@ -1,7 +1,8 @@
 import * as vscode from 'vscode';
 import { ConfigurationManager } from './config';
 import { SessionContextTracker } from './context-tracker';
-import { MODELS, toChatInfo, getModelCapabilities, getMaxOutputTokens, getModelDefaults, findModelById } from './models';
+import { MODELS, toChatInfo, getModelCapabilities, getMaxOutputTokens, getModelDefaults, findModelById, applyServerModelCatalog, getEffectiveModels } from './models';
+import { fetchKimiModels } from './models-client';
 import { UsageTracker, hasUsage } from './usage';
 import type { KimiContentPart, KimiMessage, KimiTool, KimiToolCall, KimiRequest, KimiStreamChunk, ModelDefaults, ModelConfigOverride } from './types';
 
@@ -10,6 +11,7 @@ import type { KimiContentPart, KimiMessage, KimiTool, KimiToolCall, KimiRequest,
 // ═══════════════════════════════════════════════════════════════════════
 
 const DEFAULT_ENDPOINT = 'https://api.kimi.com/coding/v1/chat/completions';
+const DEFAULT_MODELS_ENDPOINT = 'https://api.kimi.com/coding/v1/models';
 
 // ═══════════════════════════════════════════════════════════════════════
 // Provider class — implements the non-generic LanguageModelChatProvider
@@ -43,6 +45,49 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
         this._onDidChange.fire();
     }
 
+    /** Applies the cached server catalog (survives restarts) to the registry. */
+    applyCachedServerModels(): void {
+        applyServerModelCatalog(this.configManager.getServerModels());
+    }
+
+    /**
+     * Fetches GET /models with the API key and layers the returned
+     * per-subscription parameters over the hard-coded registry. On success
+     * the catalog is cached and the picker is refreshed; on any failure the
+     * hard-coded/cached values stay in effect. Safe to fire-and-forget.
+     */
+    async refreshModelsFromServer(): Promise<void> {
+        const apiKey = await this.configManager.getApiKey();
+        if (!apiKey) {
+            this.outputChannel.info('Skipping /models refresh: API key not set');
+            return;
+        }
+        const endpoint = this.deriveModelsEndpoint();
+        const result = await fetchKimiModels(apiKey, endpoint, this.configManager.getTimeout());
+        if (result.kind !== 'ok') {
+            this.outputChannel.warn(
+                `Failed to refresh model catalog from ${endpoint}: ${result.message}`,
+            );
+            return;
+        }
+        applyServerModelCatalog(result.models);
+        await this.configManager.setServerModels([...result.models]);
+        this.outputChannel.info(
+            `Model catalog refreshed from server (${result.models.length} models): ` +
+            result.models.map((m) => `${m.id} ctx=${m.contextLength}`).join(', '),
+        );
+        this._onDidChange.fire();
+    }
+
+    /** Derives the /models endpoint from the configured chat endpoint. */
+    private deriveModelsEndpoint(): string {
+        const endpoint = this.configManager.getEndpoint();
+        if (endpoint.endsWith('/chat/completions')) {
+            return endpoint.slice(0, -'/chat/completions'.length) + '/models';
+        }
+        return DEFAULT_MODELS_ENDPOINT;
+    }
+
     /** Access the local usage tracker for status bar / commands. */
     getUsageTracker(): UsageTracker {
         return this.usageTracker;
@@ -57,7 +102,7 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
         // Always return models — the `silent` flag means "don't prompt for credentials",
         // not "don't report models". The official sample ignores it entirely.
         const hasApiKey = !!(await this.configManager.getApiKey());
-        return MODELS.map((model) => toChatInfo(model, hasApiKey, this.configManager.getModelConfig(model.id)));
+        return getEffectiveModels().map((model) => toChatInfo(model, hasApiKey, this.configManager.getModelConfig(model.id)));
     }
 
     // ── Chat response ──────────────────────────────────────────────
