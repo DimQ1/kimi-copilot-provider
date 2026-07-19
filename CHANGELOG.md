@@ -15,7 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Added `stream_options: { include_usage: true }` to streaming chat completion requests so the status bar usage counter updates correctly.
 
-## [Unreleased]
+## [1.6.0] - 2026-07-20
+
+### Added
+- **Thinking / reasoning content is now displayed** in Copilot Chat. When the Kimi API returns `reasoning_content` in streaming or non-streaming responses, the provider forwards it to the Chat UI via `LanguageModelThinkingPart` (VS Code proposed API) so it renders as a collapsible "Thinking" section. When the proposed API is unavailable, the thinking text falls back to a formatted markdown blockquote prefixed before the first text chunk.
 
 ## [1.5.7] - 2026-07-19
 

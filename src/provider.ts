@@ -667,6 +667,60 @@ export function convertTools(
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// LanguageModelThinkingPart helper
+// ═══════════════════════════════════════════════════════════════════════
+//
+// `LanguageModelThinkingPart` is a proposed API available in VS Code 1.129+.
+// Only the `github.copilot-chat` extension has it enabled by default in its
+// product.json proposals list — third-party providers must use
+// `--enable-proposed-api` or check at runtime.
+//
+// Strategy: try to resolve the constructor at runtime. On success we use the
+// native thinking part (renders as a collapsible block in the Chat UI). On
+// failure we accumulate the thinking text and either prepend it as markdown
+// (non-streaming) or emit it as a regular text part (streaming).
+
+const THINKING_HEADER = '> 💭 **Thinking**';
+
+let _thinkingPartCtor: { new (value: string | string[], id?: string, metadata?: { readonly [key: string]: any }): unknown } | undefined;
+
+function getThinkingPartCtor(): typeof _thinkingPartCtor {
+    if (_thinkingPartCtor === undefined) {
+        try {
+            _thinkingPartCtor = (vscode as any).LanguageModelThinkingPart;
+            if (typeof _thinkingPartCtor !== 'function') {
+                _thinkingPartCtor = undefined;
+            }
+        } catch {
+            _thinkingPartCtor = undefined;
+        }
+    }
+    return _thinkingPartCtor;
+}
+
+/** Try to report thinking content using the native VS Code part. Returns true on success. */
+function tryReportThinkingPart(
+    progress: vscode.Progress<vscode.LanguageModelResponsePart>,
+    content: string,
+): boolean {
+    const ctor = getThinkingPartCtor();
+    if (!ctor) {
+        return false;
+    }
+    try {
+        progress.report(new ctor(content) as any);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+/** Format thinking content as a markdown blockquote for text fallback. */
+function formatThinkingAsText(content: string): string {
+    return `${THINKING_HEADER}\n> ${content.trim().replace(/\n/g, '\n> ')}\n\n---\n\n`;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // Non-streaming response
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -681,6 +735,7 @@ async function completeResponse(
             message?: {
                 role?: string;
                 content?: string | null;
+                reasoning_content?: string | null;
                 tool_calls?: KimiToolCall[];
             };
             finish_reason: string | null;
@@ -702,6 +757,17 @@ async function completeResponse(
     if (!message) {
         outputChannel.warn('Empty response from Kimi API');
         return;
+    }
+
+    // Reasoning / thinking content (non-streaming responses may include it)
+    if (message.reasoning_content) {
+        outputChannel.debug(`Kimi reasoning content in non-streaming response (${message.reasoning_content.length} chars)`);
+        const reported = tryReportThinkingPart(progress, message.reasoning_content);
+        if (!reported) {
+            // Fallback: prepend thinking as a formatted text block
+            outputChannel.debug('LanguageModelThinkingPart unavailable, using text fallback for reasoning content');
+            progress.report(new vscode.LanguageModelTextPart(formatThinkingAsText(message.reasoning_content)));
+        }
     }
 
     if (message.content) {
@@ -744,6 +810,12 @@ async function streamSSEResponse(
         { id: string; name: string; args: string }
     >();
 
+    // Fallback reasoning buffer — used when LanguageModelThinkingPart is unavailable.
+    // Reasoning typically arrives before text content. We buffer it and flush at the
+    // first text chunk (or at stream end) as a formatted markdown block.
+    let fallbackReasoningBuffer: string | undefined;
+    let thinkingPartAvailable: boolean | undefined; // undefined = not yet determined
+
     const emitPendingToolCalls = (): void => {
         if (pendingToolCalls.size === 0) {
             return;
@@ -760,6 +832,30 @@ async function streamSSEResponse(
             }
         }
         pendingToolCalls.clear();
+    };
+
+    /** Flush accumulated fallback reasoning as a text part, if any. */
+    const flushFallbackReasoning = (): void => {
+        if (fallbackReasoningBuffer && fallbackReasoningBuffer.length > 0) {
+            outputChannel.debug(`Flushing accumulated reasoning (${fallbackReasoningBuffer.length} chars) as text fallback`);
+            progress.report(new vscode.LanguageModelTextPart(formatThinkingAsText(fallbackReasoningBuffer)));
+            fallbackReasoningBuffer = undefined;
+        }
+    };
+
+    /** Attempt to report a reasoning delta natively; fall back to buffering. */
+    const handleReasoningDelta = (text: string): void => {
+        // First call: probe whether LanguageModelThinkingPart is available
+        if (thinkingPartAvailable === undefined) {
+            thinkingPartAvailable = tryReportThinkingPart(progress, text);
+        }
+        if (thinkingPartAvailable) {
+            // Already proven available — subsequent deltas use it directly
+            tryReportThinkingPart(progress, text);
+        } else {
+            // Fallback: buffer until we hit text content or stream end
+            fallbackReasoningBuffer = (fallbackReasoningBuffer ?? '') + text;
+        }
     };
 
     try {
@@ -782,6 +878,10 @@ async function streamSSEResponse(
 
             const { done, value } = readResult;
             if (done) {
+                // Stream ended — flush any remaining fallback reasoning before tool calls
+                if (fallbackReasoningBuffer) {
+                    flushFallbackReasoning();
+                }
                 emitPendingToolCalls();
                 break;
             }
@@ -798,6 +898,9 @@ async function streamSSEResponse(
 
                 const payload = trimmed.slice(5).trim();
                 if (payload === '[DONE]') {
+                    if (fallbackReasoningBuffer) {
+                        flushFallbackReasoning();
+                    }
                     emitPendingToolCalls();
                     return;
                 }
@@ -815,12 +918,22 @@ async function streamSSEResponse(
                         continue;
                     }
 
+                    // Reasoning / thinking content (streaming delta)
                     if (delta.reasoning_content) {
                         outputChannel.debug(`Kimi reasoning delta received (${delta.reasoning_content.length} chars)`);
+                        handleReasoningDelta(delta.reasoning_content);
                     }
 
                     // Text content
                     if (delta.content) {
+                        // Flush any buffered fallback reasoning before the first text chunk
+                        if (fallbackReasoningBuffer) {
+                            flushFallbackReasoning();
+                        }
+                        if (thinkingPartAvailable === undefined) {
+                            // No reasoning was seen — mark thinking as unavailable so we don't probe later
+                            thinkingPartAvailable = false;
+                        }
                         progress.report(new vscode.LanguageModelTextPart(delta.content));
                     }
 
@@ -847,6 +960,9 @@ async function streamSSEResponse(
 
                     // Emit completed tool calls on finish
                     if (parsed.choices[0].finish_reason) {
+                        if (fallbackReasoningBuffer) {
+                            flushFallbackReasoning();
+                        }
                         emitPendingToolCalls();
                     }
                 } catch (parseErr) {
