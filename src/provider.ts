@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { ConfigurationManager } from './config';
-import { SessionContextTracker } from './context-tracker';
+import { SessionContextTracker, formatBytes } from './context-tracker';
 import { MODELS, toChatInfo, getModelCapabilities, getMaxOutputTokens, getModelDefaults, findModelById, applyServerModelCatalog, getEffectiveModels } from './models';
 import { fetchKimiModels } from './models-client';
 import { UsageTracker, hasUsage } from './usage';
@@ -184,10 +184,19 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
             modelConfig.frequencyPenalty ??
             this.configManager.getFrequencyPenalty(modelInfo.id) ??
             0.0;
-        const thinking =
+        let thinking =
             modelConfig.thinking ??
             this.configManager.getThinking(modelInfo.id) ??
             modelDefaults?.thinking;
+        // When the server declares supports_thinking_type: "only" (all current
+        // Kimi Code models), the API rejects thinking.type: "disabled" — drop a
+        // stale user override instead of failing the request.
+        if (thinking?.type === 'disabled' && modelDefinition?.supportsThinkingType === 'only') {
+            this.outputChannel.warn(
+                `Model ${modelInfo.id} does not support disabling thinking (supports_thinking_type: "only"); ignoring the override.`,
+            );
+            thinking = { type: 'enabled' };
+        }
         const reasoningEffort = resolveReasoningEffortFromOptions(options, modelDefaults, modelConfig);
 
         const maxTokensSetting = this.configManager.getMaxTokens(modelInfo.id);
@@ -223,7 +232,7 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
         });
         const estimate = tracker.estimate(allMessages);
         this.outputChannel.info(
-            `Context estimate: ~${estimate.tokens.toLocaleString('en-US')} / ${estimate.limit.toLocaleString('en-US')} tokens (${Math.round(estimate.ratio * 100)}%), per-request cap ${tracker.getRequestLimit().toLocaleString('en-US')}`,
+            `Context estimate: ~${estimate.tokens.toLocaleString('en-US')} / ${estimate.limit.toLocaleString('en-US')} tokens (${Math.round(estimate.ratio * 100)}%), per-request cap ${tracker.getRequestLimit().toLocaleString('en-US')}, body ~${formatBytes(estimate.bodyBytes)} / 2 MiB (${Math.round(estimate.byteRatio * 100)}%)`,
         );
         try {
             tracker.check(allMessages);
@@ -356,30 +365,123 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
 
     // ── Fetch with timeout, retry and cancellation ─────────────────
 
+    /**
+     * Fetches with retries on retryable conditions:
+     * - HTTP 429 (rate limit) — honors the `Retry-After` header when present;
+     * - HTTP 500/502/503 (server errors);
+     * - network failures (fetch rejects) — the server never saw the request.
+     *
+     * Non-retryable statuses (400, 401, 403, …) are returned to the caller
+     * immediately so it can map them to a LanguageModelError. The response
+     * body of a retried attempt is always drained to free the connection.
+     */
     private async fetchWithRetry(
         url: string,
         init: RequestInit,
         timeoutMs: number,
         token: vscode.CancellationToken,
-        attempt = 1,
     ): Promise<Response> {
-        try {
-            return await this.fetchWithTimeout(url, init, timeoutMs, token);
-        } catch (err) {
-            const message = err instanceof Error ? err.message : String(err);
-            const isRetryable =
-                err instanceof vscode.LanguageModelError &&
-                (message.includes('429') || message.includes('server error'));
+        const maxAttempts = this.configManager.getMaxRetries() + 1;
+        let lastError: unknown;
 
-            if (isRetryable && attempt < 3) {
-                const delay = Math.min(1000 * 2 ** attempt, 8000);
-                this.outputChannel.warn(`Retryable error, waiting ${delay}ms before attempt ${attempt + 1}`);
-                await new Promise((resolve) => setTimeout(resolve, delay));
-                return this.fetchWithRetry(url, init, timeoutMs, token, attempt + 1);
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            // Network-level failure (DNS, connection reset, timeout, abort).
+            try {
+                const response = await this.fetchWithTimeout(url, init, timeoutMs, token);
+                if (response.ok || !this.isRetryableStatus(response.status)) {
+                    return response;
+                }
+                // Retryable HTTP status. Read the body ONCE — Response.text()
+                // consumes the stream, and the caller re-reads it for the error
+                // message on the final attempt.
+                const retryAfterMs = this.parseRetryAfterMs(response.headers.get('retry-after'));
+                const bodyText = await response.text().catch(() => '');
+                if (attempt >= maxAttempts) {
+                    // Final attempt: hand the caller a fresh Response with the
+                    // same status/headers and the buffered body, so its
+                    // response.text() in the error path still works.
+                    return new Response(bodyText, {
+                        status: response.status,
+                        statusText: response.statusText,
+                        headers: response.headers,
+                    });
+                }
+                const delayMs = this.computeRetryDelayMs(attempt, retryAfterMs);
+                this.notifyRetry(attempt, maxAttempts, delayMs, `HTTP ${response.status}`, retryAfterMs !== undefined);
+                await this.sleep(delayMs, token);
+                continue;
+            } catch (err) {
+                lastError = err;
+                if (token.isCancellationRequested || attempt >= maxAttempts) {
+                    throw err;
+                }
+                const delayMs = this.computeRetryDelayMs(attempt, undefined);
+                this.notifyRetry(attempt, maxAttempts, delayMs, 'network error', false);
+                await this.sleep(delayMs, token);
             }
-
-            throw err;
         }
+        throw lastError;
+    }
+
+    /** 429 and 5xx are worth retrying; everything else is a hard failure. */
+    private isRetryableStatus(status: number): boolean {
+        return status === 429 || status === 500 || status === 502 || status === 503;
+    }
+
+    /**
+     * Parses the `Retry-After` header. Supports both delta-seconds and an
+     * HTTP-date. Returns undefined when absent or unparsable.
+     */
+    private parseRetryAfterMs(value: string | null): number | undefined {
+        return parseRetryAfterHeader(value);
+    }
+
+    /**
+     * Computes the wait before the next attempt: server `Retry-After` wins;
+     * otherwise exponential backoff (base × 2^(attempt-1)) with ±25% jitter,
+     * capped at the configured maximum.
+     */
+    private computeRetryDelayMs(attempt: number, retryAfterMs: number | undefined): number {
+        return computeBackoffDelayMs({
+            attempt,
+            retryAfterMs,
+            baseDelayMs: this.configManager.getRetryBaseDelayMs(),
+            maxDelayMs: this.configManager.getRetryMaxDelayMs(),
+        });
+    }
+
+    /** Logs the retry and shows a non-intrusive status notification. */
+    private notifyRetry(
+        attempt: number,
+        maxAttempts: number,
+        delayMs: number,
+        reason: string,
+        serverHinted: boolean,
+    ): void {
+        const seconds = (delayMs / 1000).toFixed(1);
+        this.outputChannel.warn(
+            `Retry ${attempt}/${maxAttempts - 1} after ${reason}: waiting ${seconds}s${serverHinted ? ' (server Retry-After)' : ''}`,
+        );
+        if (attempt === 1) {
+            // Notify once per request — subsequent retries stay in the log.
+            void vscode.window.showInformationMessage(
+                `Kimi Copilot: rate limited by the API (${reason}). Retrying automatically — this may take a moment…`,
+            );
+        }
+    }
+
+    /** Sleep that resolves early when the request is cancelled. */
+    private sleep(ms: number, token: vscode.CancellationToken): Promise<void> {
+        return new Promise((resolve) => {
+            const timer = setTimeout(() => {
+                disposable.dispose();
+                resolve();
+            }, ms);
+            const disposable = token.onCancellationRequested(() => {
+                clearTimeout(timer);
+                resolve();
+            });
+        });
     }
 
     private async fetchWithTimeout(
@@ -522,6 +624,64 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
 // ═══════════════════════════════════════════════════════════════════════
 // Helpers — message conversion
 // ═══════════════════════════════════════════════════════════════════════
+
+/**
+ * Parses the `Retry-After` response header (RFC 9110 §10.2.3): either
+ * delta-seconds or an HTTP-date. Returns milliseconds, or undefined when the
+ * header is absent/unparsable. Pure — exported for unit tests.
+ */
+export function parseRetryAfterHeader(value: string | null | undefined): number | undefined {
+    if (!value) {
+        return undefined;
+    }
+    const trimmed = value.trim();
+    // Delta-seconds: a non-negative integer per RFC 9110 §10.2.3. A bare
+    // signed number is NOT valid and must not fall through to Date.parse
+    // (V8 happily parses '-3' as a timestamp in the past).
+    if (/^\d+$/.test(trimmed)) {
+        return Number(trimmed) * 1000;
+    }
+    if (/^[+-]?\d*\.?\d+$/.test(trimmed)) {
+        return undefined;
+    }
+    const date = Date.parse(trimmed);
+    if (!Number.isNaN(date)) {
+        return Math.max(0, date - Date.now());
+    }
+    return undefined;
+}
+
+export interface BackoffOptions {
+    /** 1-based attempt number (the attempt that just failed). */
+    attempt: number;
+    /** Server-provided Retry-After in ms, when present — wins over backoff. */
+    retryAfterMs?: number | undefined;
+    /** Base delay for the first retry. */
+    baseDelayMs: number;
+    /** Cap for the computed backoff delay. */
+    maxDelayMs: number;
+    /** Jitter source, injectable for tests. Defaults to Math.random. */
+    random?: () => number;
+}
+
+/**
+ * Computes the wait before the next retry. Server `Retry-After` wins (capped
+ * at 4× maxDelayMs so a hostile header cannot park the caller forever);
+ * otherwise exponential backoff (base × 2^(attempt-1)) with ±25% jitter,
+ * capped at maxDelayMs. Pure — exported for unit tests.
+ */
+export function computeBackoffDelayMs(options: BackoffOptions): number {
+    if (options.retryAfterMs !== undefined) {
+        return Math.min(options.retryAfterMs, options.maxDelayMs * 4);
+    }
+    const exponential = Math.min(
+        options.baseDelayMs * 2 ** (options.attempt - 1),
+        options.maxDelayMs,
+    );
+    const random = options.random ?? Math.random;
+    const jitter = exponential * (0.75 + random() * 0.5);
+    return Math.round(Math.min(jitter, options.maxDelayMs));
+}
 
 function roleToString(role: vscode.LanguageModelChatMessageRole): string {
     switch (role) {

@@ -56,6 +56,7 @@ function toModelInfo(item: unknown): KimiServerModelInfo | undefined {
 	}
 	const displayName = item['display_name'];
 	const thinkEfforts = parseThinkEfforts(item['think_efforts']);
+	const thinkingType = item['supports_thinking_type'];
 	return {
 		id: item['id'],
 		contextLength,
@@ -67,6 +68,10 @@ function toModelInfo(item: unknown): KimiServerModelInfo | undefined {
 			: true,
 		displayName:
 			typeof displayName === 'string' && displayName.length > 0 ? displayName : undefined,
+		supportsThinkingType:
+			thinkingType === 'only' || thinkingType === 'no' || thinkingType === 'both'
+				? thinkingType
+				: undefined,
 		supportEfforts: thinkEfforts.supportEfforts ? [...thinkEfforts.supportEfforts] : undefined,
 		defaultEffort: thinkEfforts.defaultEffort,
 	};
@@ -199,8 +204,13 @@ export function applyServerModels(
 			imageInput: server.supportsImageIn,
 			thinking: server.supportsReasoning,
 		};
+		if (server.supportsThinkingType !== undefined) {
+			next.supportsThinkingType = server.supportsThinkingType;
+		}
 
-		// Reasoning effort levels (only when the server declares them).
+		// Reasoning effort levels (only when the server declares them). The
+		// server default_effort wins over the hard-coded default — e.g. K3
+		// ships default_effort: "high" while the local table says "max".
 		if (server.supportEfforts && server.supportEfforts.length > 0) {
 			const defaultEffort = clampEffort(server.defaultEffort, server.supportEfforts);
 			if (defaultEffort !== undefined) {

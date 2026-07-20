@@ -187,6 +187,12 @@ export interface ModelDefinition {
 	 * takes precedence over the manual plan hint in the context tracker.
 	 */
 	serverContextLength?: number;
+	/**
+	 * Server-declared thinking toggle support ('only' = thinking cannot be
+	 * disabled). When 'only', a user override `thinking: disabled` is ignored
+	 * because the API would reject it.
+	 */
+	supportsThinkingType?: 'only' | 'no' | 'both';
 }
 
 export interface KimiModelsResponse {
@@ -209,6 +215,13 @@ export interface KimiServerModelInfo {
 	supportsVideoIn: boolean;
 	supportsToolUse: boolean;
 	displayName?: string;
+	/**
+	 * Server-declared thinking toggle support:
+	 * - 'only' — thinking cannot be turned off (all current Kimi Code models);
+	 * - 'no'   — thinking is not supported at all;
+	 * - 'both' — thinking can be toggled on and off.
+	 */
+	supportsThinkingType?: 'only' | 'no' | 'both';
 	/** Thinking effort levels the model accepts (from `think_efforts`). */
 	supportEfforts?: string[];
 	/** Server default thinking effort. */

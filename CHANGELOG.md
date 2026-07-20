@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.7.0] - 2026-07-20
 
 ### Changed
 - The server-resolved `context_length` from `GET /models` is now the source of truth for the session context window (256K Moderato / 1M Allegretto+). The manual `kimiCopilot.plan` hint is only a fallback used before the first successful catalog fetch.
@@ -16,7 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Automatic background refresh of the `/models` catalog when the API rejects a request for context length (HTTP 400) — picks up subscription tier changes (e.g. downgrade from Allegretto+ to Moderato) without a manual refresh.
 - A dedicated error message for HTTP 400 context-length rejections explaining the 262144 per-request cap.
 - **Auto-compact fallback** (`kimiCopilot.autoCompactOnLimit`, default `true`): when a request exceeds the token limit — either caught by the local pre-flight estimate or rejected by the API with HTTP 400 — the provider warns the user and runs `github.copilot.chat.compact` (the Copilot Chat `/compact` command) once per session, then asks the user to resend the message. Falls back to a manual `/compact` hint when the command is unavailable.
-- Unit tests covering: server context wins over the plan hint (both directions), per-request cap on a 1M plan, cap shrinking with a smaller server window, and `applyServerModels` propagating `serverContextLength`.
+- **Automatic retry on 429 / 5xx** (`kimiCopilot.maxRetries` default 5, `kimiCopilot.retryBaseDelayMs` default 2000, `kimiCopilot.retryMaxDelayMs` default 60000): rate-limit (HTTP 429) and server-error (500/502/503) responses are now retried inside the fetch loop — previously the retry logic only caught network exceptions, so a 429 failed the request immediately. The wait between attempts honors the server `Retry-After` header (delta-seconds or HTTP-date), otherwise exponential backoff with ±25% jitter. A one-time information message tells the user the request is being retried; every attempt is logged to the output channel. Cancellation aborts the wait immediately.
+- **2 MiB request-body guard**: the context tracker now also estimates the UTF-8 byte size of the request body and rejects it before sending when it crosses the API's hard 2 MiB cap (confirmed by live probing — the real ceiling is bytes, not tokens; CJK/Cyrillic text weighs 2-3 bytes per character, so ~450-500K tokens is the practical maximum even on a 1M plan). The output channel log shows both the token and the byte estimate.
+- **`supports_thinking_type` handling**: parsed from `GET /models` and stored on the model definition. When the server declares `"only"` (all current Kimi Code models), a stale user override `thinking: disabled` is ignored with a warning instead of failing the request.
+- **Server `default_effort` wins over the hard-coded default**: K3 now starts at `high` (the server-declared default) instead of the previously hard-coded `max`; an out-of-range `default_effort` is ignored.
+- Unit tests covering: server context wins over the plan hint (both directions), per-request cap on a 1M plan, cap shrinking with a smaller server window, `applyServerModels` propagating `serverContextLength` / `supportsThinkingType` / `defaultEffort`, `parseRetryAfterHeader` (delta-seconds / HTTP-date / invalid values), `computeBackoffDelayMs` (Retry-After precedence, cap, exponential growth, jitter bounds), and the 2 MiB body guard (UTF-8 byte counting, override, `formatBytes`).
 
 ## [1.4.5] - 2026-07-18
 

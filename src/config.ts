@@ -196,6 +196,22 @@ export class ConfigurationManager {
 		return this.config.get<boolean>('autoCompactOnLimit', true);
 	}
 
+	/** Max retry attempts for retryable API errors (429 / 5xx). */
+	getMaxRetries(): number {
+		const value = this.config.get<number>('maxRetries', 5);
+		return Math.max(0, Math.min(10, Math.floor(value)));
+	}
+
+	/** Base delay (ms) before the first retry; exponential backoff from here. */
+	getRetryBaseDelayMs(): number {
+		return Math.max(100, this.config.get<number>('retryBaseDelayMs', 2000));
+	}
+
+	/** Cap (ms) for the computed backoff delay. */
+	getRetryMaxDelayMs(): number {
+		return Math.max(1000, this.config.get<number>('retryMaxDelayMs', 60000));
+	}
+
 	/** Optional user plan hint used to pick multi-tier context limits. */
 	getPlan(): string | undefined {
 		return this.config.get<string>('plan', '');

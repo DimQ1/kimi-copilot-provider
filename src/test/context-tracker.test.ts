@@ -1,5 +1,5 @@
 import * as assert from 'assert';
-import { SessionContextTracker, estimateTextTokens } from '../context-tracker';
+import { SessionContextTracker, estimateTextTokens, estimateRequestBodyBytes, formatBytes, DEFAULT_MAX_BODY_BYTES } from '../context-tracker';
 
 suite('SessionContextTracker', () => {
 	test('estimates text message tokens', () => {
@@ -155,5 +155,61 @@ suite('SessionContextTracker', () => {
 
 		const exceeded = tracker.estimate([{ role: 'user', content: 'a'.repeat(5000) }]);
 		assert.ok(tracker.formatStatus(exceeded).includes('error'));
+	});
+
+	suite('request body byte limit (2 MiB API cap)', () => {
+		test('estimateRequestBodyBytes counts UTF-8 bytes, not characters', () => {
+			// '你' is 1 char but 3 bytes in UTF-8 — the API cap is on bytes.
+			const ascii = estimateRequestBodyBytes([{ role: 'user', content: 'a'.repeat(100) }]);
+			const cjk = estimateRequestBodyBytes([{ role: 'user', content: '你'.repeat(100) }]);
+			assert.ok(cjk > ascii, `CJK (${cjk}) should weigh more than ASCII (${ascii})`);
+			assert.strictEqual(cjk - ascii, 200);
+		});
+
+		test('exceeded when body crosses the byte cap while tokens fit', () => {
+			const tracker = new SessionContextTracker({
+				maxInputTokens: 1048576,
+				warningThreshold: 0.8,
+				errorThreshold: 0.95,
+			});
+			// 3-byte chars: 700_000 chars ≈ 2.1 MB body, but only ~200K tokens.
+			const big = '你'.repeat(700_000);
+			const estimate = tracker.estimate([{ role: 'user', content: big }]);
+			assert.ok(estimate.bodyBytes >= DEFAULT_MAX_BODY_BYTES);
+			assert.strictEqual(estimate.status, 'exceeded');
+			assert.throws(
+				() => tracker.check([{ role: 'user', content: big }]),
+				(err: Error) => err.message.includes('request-size limit'),
+			);
+		});
+
+		test('byte limit is overridable', () => {
+			const tracker = new SessionContextTracker({
+				maxInputTokens: 1048576,
+				warningThreshold: 0.8,
+				errorThreshold: 0.95,
+				maxBodyBytes: 1024,
+			});
+			const estimate = tracker.estimate([{ role: 'user', content: 'a'.repeat(2000) }]);
+			assert.strictEqual(estimate.status, 'exceeded');
+		});
+
+		test('estimate includes bodyBytes and byteRatio', () => {
+			const tracker = new SessionContextTracker({
+				maxInputTokens: 1048576,
+				warningThreshold: 0.8,
+				errorThreshold: 0.95,
+			});
+			const estimate = tracker.estimate([{ role: 'user', content: 'hello' }]);
+			assert.ok(estimate.bodyBytes > 0);
+			assert.ok(estimate.byteRatio >= 0 && estimate.byteRatio <= 1);
+			assert.strictEqual(estimate.status, 'ok');
+		});
+
+		test('formatBytes renders KiB/MiB', () => {
+			assert.strictEqual(formatBytes(500), '500 B');
+			assert.strictEqual(formatBytes(2048), '2.0 KiB');
+			assert.strictEqual(formatBytes(2 * 1024 * 1024), '2.00 MiB');
+		});
 	});
 });

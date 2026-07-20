@@ -15,6 +15,14 @@ export interface ContextEstimate {
 	ratio: number;
 	/** Human readable status: ok, warning, critical, exceeded. */
 	status: 'ok' | 'warning' | 'critical' | 'exceeded';
+	/**
+	 * Estimated request body size in bytes (UTF-8 JSON). The Kimi Code API
+	 * rejects bodies above 2 MiB regardless of token count — this matters
+	 * for non-Latin text, where a token can weigh 2-3 bytes.
+	 */
+	bodyBytes: number;
+	/** 0..1 ratio of bodyBytes to the byte limit. */
+	byteRatio: number;
 }
 
 export interface SessionContextTrackerOptions {
@@ -39,7 +47,16 @@ export interface SessionContextTrackerOptions {
 	 * Fallback only — used when the server catalog has not been fetched yet.
 	 */
 	plan?: string;
+	/**
+	 * Hard request-body byte limit (default 2 MiB, the Kimi Code API cap).
+	 * Bodies above this are rejected with HTTP 400 even when the token count
+	 * fits the context window — see kimi_api_research.md.
+	 */
+	maxBodyBytes?: number;
 }
+
+/** Kimi Code API request body cap: 2 MiB (confirmed by live probing). */
+export const DEFAULT_MAX_BODY_BYTES = 2 * 1024 * 1024;
 
 /**
  * Estimates the token count for a Kimi message.
@@ -132,17 +149,20 @@ export class SessionContextTracker {
 		const tokens = messages.reduce((sum, m) => sum + estimateMessageTokens(m), 0);
 		const limit = this.getEffectiveLimit();
 		const ratio = limit > 0 ? Math.min(1, tokens / limit) : 0;
+		const bodyBytes = estimateRequestBodyBytes(messages);
+		const maxBytes = this.options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
+		const byteRatio = maxBytes > 0 ? Math.min(1, bodyBytes / maxBytes) : 0;
 
 		let status: ContextEstimate['status'] = 'ok';
-		if (tokens >= limit) {
+		if (tokens >= limit || bodyBytes >= maxBytes) {
 			status = 'exceeded';
-		} else if (ratio >= this.options.errorThreshold) {
+		} else if (ratio >= this.options.errorThreshold || byteRatio >= this.options.errorThreshold) {
 			status = 'critical';
-		} else if (ratio >= this.options.warningThreshold) {
+		} else if (ratio >= this.options.warningThreshold || byteRatio >= this.options.warningThreshold) {
 			status = 'warning';
 		}
 
-		return { tokens, limit, ratio, status };
+		return { tokens, limit, ratio, status, bodyBytes, byteRatio };
 	}
 
 	/**
@@ -157,6 +177,13 @@ export class SessionContextTracker {
 	check(messages: KimiMessage[]): ContextEstimate {
 		const estimate = this.estimate(messages);
 		const requestLimit = this.getRequestLimit();
+		const maxBytes = this.options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
+
+		if (estimate.bodyBytes >= maxBytes) {
+			throw new vscode.LanguageModelError(
+				`Kimi request-size limit exceeded: the request body is ~${formatBytes(estimate.bodyBytes)}, but the API rejects bodies above ${formatBytes(maxBytes)} (Cloudflare cap, compression not supported).\n\nStart a new chat session, run "/compact", or remove files from the context.`,
+			);
+		}
 
 		if (estimate.tokens >= requestLimit) {
 			const sessionLimit = estimate.limit;
@@ -198,4 +225,48 @@ export class SessionContextTracker {
 
 export function estimateTextTokens(text: string): number {
 	return Math.max(1, Math.ceil(text.length / 3.5));
+}
+
+/**
+ * Estimates the UTF-8 byte size of the JSON request body for these messages.
+ * Uses Buffer.byteLength on the serialized message contents rather than the
+ * raw character count, because CJK/Cyrillic characters weigh 2-3 bytes each
+ * and the API's hard cap (2 MiB) is on BYTES, not characters.
+ * Includes a fixed overhead for JSON structure, the model field and tools.
+ */
+export function estimateRequestBodyBytes(messages: KimiMessage[]): number {
+	const JSON_OVERHEAD_BYTES = 4096;
+	let bytes = 0;
+	for (const message of messages) {
+		if (typeof message.content === 'string') {
+			bytes += Buffer.byteLength(message.content, 'utf8');
+		} else if (Array.isArray(message.content)) {
+			for (const part of message.content) {
+				if (part.type === 'text') {
+					bytes += Buffer.byteLength(part.text, 'utf8');
+				} else if (part.type === 'image_url') {
+					// data: URL — base64 payload, ~4/3 of the raw image bytes.
+					bytes += Buffer.byteLength(part.image_url.url, 'utf8');
+				}
+			}
+		}
+		if (message.tool_calls) {
+			for (const tc of message.tool_calls) {
+				bytes += Buffer.byteLength(tc.function.name, 'utf8');
+				bytes += Buffer.byteLength(tc.function.arguments, 'utf8');
+			}
+		}
+	}
+	return bytes + JSON_OVERHEAD_BYTES;
+}
+
+/** Formats a byte count as KiB/MiB for error messages. */
+export function formatBytes(bytes: number): string {
+	if (bytes >= 1024 * 1024) {
+		return `${(bytes / (1024 * 1024)).toFixed(2)} MiB`;
+	}
+	if (bytes >= 1024) {
+		return `${(bytes / 1024).toFixed(1)} KiB`;
+	}
+	return `${bytes} B`;
 }

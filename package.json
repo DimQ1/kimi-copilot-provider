@@ -2,7 +2,7 @@
   "name": "kimi-copilot-provider",
   "displayName": "Kimi Copilot Provider",
   "description": "Use Kimi K3 and K2.x models in GitHub Copilot Chat — Thinking/reasoning display, vision, tool calling, zero config. 🎁 New to Kimi? Subscribe via referral and we both get up to 1-Year Membership Credits: https://kimi-bot.com/activities/viral-referral/share?scenario=subscribe&from=share_poster&invitation_code=ZKH245",
-  "version": "1.6.2",
+  "version": "1.7.0",
   "publisher": "kimi-ext",
   "license": "MIT",
   "icon": "icon.png",
@@ -273,6 +273,25 @@
           "type": "boolean",
           "default": true,
           "description": "When a request exceeds the token limit, automatically trigger Copilot Chat compaction (/compact) and show a warning. The user is notified only once per session."
+        },
+        "kimiCopilot.maxRetries": {
+          "type": "number",
+          "default": 5,
+          "minimum": 0,
+          "maximum": 10,
+          "description": "Maximum retry attempts for retryable API errors (429 rate limit, 5xx server errors). Set to 0 to disable retries."
+        },
+        "kimiCopilot.retryBaseDelayMs": {
+          "type": "number",
+          "default": 2000,
+          "minimum": 100,
+          "description": "Base delay in milliseconds before the first retry. Subsequent retries use exponential backoff (base × 2^attempt) with jitter, capped by retryMaxDelayMs."
+        },
+        "kimiCopilot.retryMaxDelayMs": {
+          "type": "number",
+          "default": 60000,
+          "minimum": 1000,
+          "description": "Maximum delay in milliseconds between retries. The server-provided Retry-After header takes precedence when present."
         },
         "kimiCopilot.plan": {
           "type": "string",

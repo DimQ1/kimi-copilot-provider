@@ -1,6 +1,6 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
-import { buildKimiRequest, convertMessages, convertTools, extractTextContent, resolveReasoningEffort, formatThinkingAsText, tryReportThinkingPart } from '../provider';
+import { buildKimiRequest, convertMessages, convertTools, extractTextContent, resolveReasoningEffort, formatThinkingAsText, tryReportThinkingPart, parseRetryAfterHeader, computeBackoffDelayMs } from '../provider';
 import { MODELS, toChatInfo } from '../models';
 import { applyServerModels } from '../models-client';
 import type { KimiTool } from '../types';
@@ -352,6 +352,129 @@ suite('provider helpers', () => {
             assert.strictEqual(k3.maxInputTokens, 262144);
             assert.strictEqual(k3.serverContextLength, undefined);
             assert.strictEqual(k3.singleRequestLimit, 262144);
+        });
+
+        test('server supports_thinking_type and default_effort are applied', () => {
+            const merged = applyServerModels(MODELS, [
+                {
+                    id: 'k3',
+                    contextLength: 1048576,
+                    supportsReasoning: true,
+                    supportsImageIn: true,
+                    supportsVideoIn: true,
+                    supportsToolUse: true,
+                    supportsThinkingType: 'only',
+                    supportEfforts: ['low', 'high', 'max'],
+                    defaultEffort: 'high',
+                },
+            ]);
+            const k3 = merged.find((m) => m.id === 'kimi-k3');
+            assert.ok(k3);
+            // Thinking cannot be disabled on this model.
+            assert.strictEqual(k3.supportsThinkingType, 'only');
+            // The server default_effort wins over the hard-coded 'max'.
+            assert.strictEqual(k3.defaults?.reasoningEffort, 'high');
+        });
+
+        test('a default_effort outside valid_efforts is ignored', () => {
+            const merged = applyServerModels(MODELS, [
+                {
+                    id: 'k3',
+                    contextLength: 1048576,
+                    supportsReasoning: true,
+                    supportsImageIn: true,
+                    supportsVideoIn: true,
+                    supportsToolUse: true,
+                    supportEfforts: ['low', 'high'],
+                    defaultEffort: 'max',
+                },
+            ]);
+            const k3 = merged.find((m) => m.id === 'kimi-k3');
+            assert.ok(k3);
+            // 'max' is not in valid_efforts → keep the hard-coded default.
+            assert.strictEqual(k3.defaults?.reasoningEffort, 'max');
+        });
+    });
+
+    suite('retry helpers', () => {
+        suite('parseRetryAfterHeader', () => {
+            test('parses delta-seconds', () => {
+                assert.strictEqual(parseRetryAfterHeader('5'), 5000);
+                assert.strictEqual(parseRetryAfterHeader(' 12 '), 12000);
+                assert.strictEqual(parseRetryAfterHeader('0'), 0);
+            });
+
+            test('parses an HTTP-date', () => {
+                const future = new Date(Date.now() + 3000).toUTCString();
+                const parsed = parseRetryAfterHeader(future);
+                assert.ok(parsed !== undefined);
+                assert.ok(parsed >= 0 && parsed <= 3000);
+            });
+
+            test('clamps a past HTTP-date to zero', () => {
+                const past = new Date(Date.now() - 60000).toUTCString();
+                assert.strictEqual(parseRetryAfterHeader(past), 0);
+            });
+
+            test('returns undefined for absent or invalid values', () => {
+                assert.strictEqual(parseRetryAfterHeader(null), undefined);
+                assert.strictEqual(parseRetryAfterHeader(undefined), undefined);
+                assert.strictEqual(parseRetryAfterHeader(''), undefined);
+                assert.strictEqual(parseRetryAfterHeader('not-a-date'), undefined);
+                assert.strictEqual(parseRetryAfterHeader('-3'), undefined);
+            });
+        });
+
+        suite('computeBackoffDelayMs', () => {
+            test('Retry-After wins over backoff', () => {
+                const delay = computeBackoffDelayMs({
+                    attempt: 3,
+                    retryAfterMs: 10000,
+                    baseDelayMs: 2000,
+                    maxDelayMs: 60000,
+                });
+                assert.strictEqual(delay, 10000);
+            });
+
+            test('Retry-After is capped at 4x maxDelayMs', () => {
+                const delay = computeBackoffDelayMs({
+                    attempt: 1,
+                    retryAfterMs: 10 * 60 * 1000,
+                    baseDelayMs: 2000,
+                    maxDelayMs: 60000,
+                });
+                assert.strictEqual(delay, 240000);
+            });
+
+            test('exponential backoff doubles per attempt (no jitter)', () => {
+                const opts = { baseDelayMs: 2000, maxDelayMs: 60000, random: () => 0.5 };
+                assert.strictEqual(computeBackoffDelayMs({ attempt: 1, ...opts }), 2000);
+                assert.strictEqual(computeBackoffDelayMs({ attempt: 2, ...opts }), 4000);
+                assert.strictEqual(computeBackoffDelayMs({ attempt: 3, ...opts }), 8000);
+            });
+
+            test('backoff is capped at maxDelayMs', () => {
+                const delay = computeBackoffDelayMs({
+                    attempt: 10,
+                    baseDelayMs: 2000,
+                    maxDelayMs: 60000,
+                    random: () => 0.5,
+                });
+                assert.strictEqual(delay, 60000);
+            });
+
+            test('jitter stays within ±25% of the exponential value', () => {
+                for (const rnd of [0, 0.999]) {
+                    const delay = computeBackoffDelayMs({
+                        attempt: 2,
+                        baseDelayMs: 2000,
+                        maxDelayMs: 60000,
+                        random: () => rnd,
+                    });
+                    assert.ok(delay >= 4000 * 0.75 - 1, `lower bound: ${delay}`);
+                    assert.ok(delay <= 4000 * 1.25 + 1, `upper bound: ${delay}`);
+                }
+            });
         });
     });
 });
