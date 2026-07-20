@@ -1,6 +1,7 @@
 # Kimi Copilot Provider
 
 [![VS Code Marketplace](https://img.shields.io/badge/VS%20Code%20Marketplace-Install-blue?style=flat-square&logo=visual-studio-code)](https://marketplace.visualstudio.com/items?itemName=kimi-ext.kimi-copilot-provider)
+[![Referral](https://img.shields.io/badge/Kimi-Subscribe%20%26%20Get%201--Year%20Credits-purple?style=flat-square&logo=kimi)](https://kimi-bot.com/activities/viral-referral/share?scenario=subscribe&from=share_poster&invitation_code=ZKH245)
 
 VS Code extension that registers **Kimi K3 and K2.x** models as a custom language model provider for GitHub Copilot Chat. Proxies chat requests to the Kimi API via SSE streaming.
 
