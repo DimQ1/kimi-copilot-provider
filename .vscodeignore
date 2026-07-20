@@ -14,3 +14,7 @@ tsconfig.json
 *.code-workspace
 out/test/**
 **/eslint.config.js
+
+agent-core-review/
+goal-pursuit/
+*.vsix
