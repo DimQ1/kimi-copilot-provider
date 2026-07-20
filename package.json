@@ -1,7 +1,7 @@
 {
   "name": "kimi-copilot-provider",
   "displayName": "Kimi Copilot Provider",
-  "description": "Use Kimi K3 and K2.x models as custom language model providers for GitHub Copilot Chat. New to Kimi? Boost me and we both win — subscribe and each get up to 1-Year Membership Credits: https://kimi-bot.com/activities/viral-referral/share?scenario=subscribe&from=share_poster&invitation_code=ZKH245",
+  "description": "Use Kimi K3 and K2.x models in GitHub Copilot Chat — Thinking/reasoning display, vision, tool calling, zero config. 🎁 New to Kimi? Subscribe via referral and we both get up to 1-Year Membership Credits: https://kimi-bot.com/activities/viral-referral/share?scenario=subscribe&from=share_poster&invitation_code=ZKH245",
   "version": "1.6.1",
   "publisher": "kimi-ext",
   "license": "MIT",
