@@ -99,10 +99,6 @@ export class SessionContextTracker {
 		this.options = options;
 	}
 
-	updateOptions(options: Partial<SessionContextTrackerOptions>): void {
-		this.options = { ...this.options, ...options };
-	}
-
 	/**
 	 * Returns the session context window for the active model/subscription.
 	 * This is the value shown to the user and used for threshold warnings —
@@ -132,9 +128,9 @@ export class SessionContextTracker {
 
 	/**
 	 * Returns the hard per-request token cap (prompt + history + files).
-	 * The Kimi Code API rejects any single request above 262144 tokens, even
-	 * when the subscription context window is 1M. The cap never exceeds the
-	 * session context window.
+	 * Live API probing showed no fixed token cap below the context window —
+	 * the only hard stop is the 2 MiB request body. The cap therefore equals
+	 * the session window and never exceeds it.
 	 */
 	getRequestLimit(): number {
 		const sessionLimit = this.getEffectiveLimit();
@@ -171,8 +167,8 @@ export class SessionContextTracker {
 	 *
 	 * Two distinct limits are enforced:
 	 * - the session context window (estimate.status) — start a new chat;
-	 * - the per-request API cap ({@link getRequestLimit}) — even a 1M plan
-	 *   cannot send more than 262144 tokens in one request.
+	 * - the per-request token cap ({@link getRequestLimit}), which follows
+	 *   the session window. The true hard stop is the 2 MiB body limit.
 	 */
 	check(messages: KimiMessage[]): ContextEstimate {
 		const estimate = this.estimate(messages);
@@ -204,27 +200,6 @@ export class SessionContextTracker {
 
 		return estimate;
 	}
-
-	/**
-	 * Formats a short status string for the status bar.
-	 */
-	formatStatus(estimate: ContextEstimate): string {
-		const percent = Math.round(estimate.ratio * 100);
-		if (estimate.status === 'exceeded') {
-			return `$(error) Ctx ${percent}%`;
-		}
-		if (estimate.status === 'critical') {
-			return `$(warning) Ctx ${percent}%`;
-		}
-		if (estimate.status === 'warning') {
-			return `$(info) Ctx ${percent}%`;
-		}
-		return `Ctx ${percent}%`;
-	}
-}
-
-export function estimateTextTokens(text: string): number {
-	return Math.max(1, Math.ceil(text.length / 3.5));
 }
 
 /**

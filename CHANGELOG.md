@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.5] - 2026-07-21
+
+### Removed
+- Dead code cleanup: unused `KimiModelsResponse` interface, `UsageTracker.getFormattedStats()` / `getContextStats()`, `KimiChatProvider.getUsageTracker()`, `SessionContextTracker.formatStatus()` / `updateOptions()`, and the standalone `estimateTextTokens()` helper (none had any production callers). Also dropped the redundant `DEFAULT_ENDPOINT` fallback in `provider.ts` — `ConfigurationManager.getEndpoint()` already always returns a non-empty URL. No behavior changes.
+
+## [1.8.0] - 2026-07-20
+
+### Added
+- **Transliterate optimizer** (`kimiCopilot.modelConfigs.<model>.transliterate`, default `false`): transliterates Cyrillic request content to Latin before sending. Measured effect: 5.3 → 2.7 bytes/token, roughly halving the request body for Cyrillic-heavy chats and delaying the 2 MiB body cap; K3 understands transliterated Russian and still answers in Russian. Applies to text parts, string content and tool arguments; image payloads, tool call ids and function names are untouched. Runs before the context estimator, so the reported byte count reflects what is actually sent. New module `src/transliterate.ts` with unit tests.
+
+### Changed
+- K3 limits aligned with live API probing: session context window and per-request cap are both 1048576 (1M). There is no fixed per-request token cap below the window — the only hard stop is the 2 MiB request body. `maxInputTokens` now reports the full window so the Chat "Session Info" popover shows the real context size.
+
 ## [1.7.0] - 2026-07-20
 
 ### Changed

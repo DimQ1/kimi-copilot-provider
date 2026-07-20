@@ -192,9 +192,9 @@ export function applyServerModels(
 			};
 		}
 		if (local.singleRequestLimit !== undefined) {
-			// The per-request API cap (262144) does NOT grow with the context
-			// window — even a 1M subscription rejects a single request above the
-			// cap. It only shrinks when the server window is smaller than the cap.
+			// No fixed per-request token cap below the context window: the
+			// cap follows the subscription window and only shrinks when the
+			// server window is smaller. The 2 MiB body cap is the real stop.
 			next.singleRequestLimit = Math.min(local.singleRequestLimit, server.contextLength);
 		}
 

@@ -150,6 +150,19 @@ export interface ModelConfigOverride {
 	systemPrompt?: string;
 	/** Whether tool calling is enabled for this model. */
 	toolCalling?: boolean;
+	/**
+	 * When true, transliterate Cyrillic text in the request to Latin before
+	 * sending. Roughly halves the request body bytes for Cyrillic-heavy
+	 * chats (measured 5.3 → 2.7 bytes/token), which matters because the
+	 * Kimi Code API caps the request body at 2 MiB. Default: off.
+	 */
+	transliterate?: boolean;
+	/**
+	 * Custom instruction appended to the system prompt when transliteration
+	 * is on (e.g. forcing the reply language). Applied on the next request.
+	 * Falls back to the global setting, then to the built-in default.
+	 */
+	transliterateSystemPrompt?: string;
 }
 
 export interface ModelDefinition {
@@ -193,13 +206,6 @@ export interface ModelDefinition {
 	 * because the API would reject it.
 	 */
 	supportsThinkingType?: 'only' | 'no' | 'both';
-}
-
-export interface KimiModelsResponse {
-	data: Array<{
-		id: string;
-		object: string;
-	}>;
 }
 
 // ---- Server model catalog types (GET /models) ----

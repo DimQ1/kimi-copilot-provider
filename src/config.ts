@@ -12,7 +12,6 @@ const API_KEY_SECRET_KEY = 'kimiCopilot.apiKey';
 /** globalState key holding the last successfully fetched /models catalog. */
 const MODELS_CACHE_KEY = 'kimiCopilot.serverModels';
 
-const DEFAULT_BASE_URL = 'https://api.kimi.com';
 const DEFAULT_ENDPOINT = 'https://api.kimi.com/coding/v1/chat/completions';
 
 export class ConfigurationManager {
@@ -70,10 +69,6 @@ export class ConfigurationManager {
 	/** Removes the stored API key. */
 	async deleteApiKey(): Promise<void> {
 		await this.secretStorage.delete(API_KEY_SECRET_KEY);
-	}
-
-	getBaseUrl(): string {
-		return this.config.get<string>('baseUrl', DEFAULT_BASE_URL).replace(/\/+$/, '');
 	}
 
 	getEndpoint(): string {
@@ -176,6 +171,37 @@ export class ConfigurationManager {
 
 	getEnableStreaming(): boolean {
 		return this.config.get<boolean>('enableStreaming', true);
+	}
+
+	/**
+	 * Whether to transliterate Cyrillic request text to Latin for a model.
+	 * Precedence: per-model config > global setting > false.
+	 */
+	getTransliterate(modelId?: string): boolean {
+		if (modelId) {
+			const modelConfig = this.getModelConfig(modelId);
+			if (modelConfig.transliterate !== undefined) {
+				return modelConfig.transliterate;
+			}
+		}
+		return this.config.get<boolean>('transliterate', false);
+	}
+
+	/**
+	 * The instruction appended to the system prompt when transliteration is
+	 * on (e.g. forcing the reply language). Read on every request, so edits
+	 * apply immediately without a reload. Precedence: per-model config >
+	 * global setting > fallback (undefined = built-in default).
+	 */
+	getTransliterateSystemPrompt(modelId?: string): string | undefined {
+		if (modelId) {
+			const modelConfig = this.getModelConfig(modelId);
+			if (modelConfig.transliterateSystemPrompt !== undefined && modelConfig.transliterateSystemPrompt.trim().length > 0) {
+				return modelConfig.transliterateSystemPrompt;
+			}
+		}
+		const global = this.config.get<string>('transliterateSystemPrompt', '');
+		return global.trim().length > 0 ? global : undefined;
 	}
 
 	getContextWarningThreshold(): number {

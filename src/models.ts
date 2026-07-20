@@ -12,8 +12,12 @@ export const MODELS: ModelDefinition[] = [
 		name: 'Kimi K3',
 		family: 'kimi',
 		version: 'kimi-k3',
-		detail: 'Flagship model (1M context on Allegretto+, 256K on Moderato; per-request limit 262K, native vision, reasoning effort)',
-		maxInputTokens: 262144,
+		detail: 'Flagship model (1M context on Allegretto+, 512K default; requests are limited only by the 2 MiB body cap, native vision, reasoning effort)',
+		// Report the full session window so the Chat "Session Info" popover
+		// shows the real context size (VS Code renders maxInputTokens +
+		// maxOutputTokens as the denominator). The /models catalog overwrites
+		// this per subscription (e.g. 1048576 on Allegretto+).
+		maxInputTokens: 1048576,
 		maxOutputTokens: 32768,
 		capabilities: {
 			toolCalling: true,
@@ -30,8 +34,14 @@ export const MODELS: ModelDefinition[] = [
 			CNY: { cacheHitInput: 2.10, cacheMissInput: 21.00, output: 105.00 },
 		},
 		priceCategory: 'medium',
-		singleRequestLimit: 262144,
-		multiTierContext: { default: 262144, allegretto: 1048576 },
+		// Live API probing (2026-07-20) showed there is NO fixed per-request
+		// token cap below the context window: a 1M-token prompt was accepted.
+		// The only hard per-request stop is the 2 MiB body limit, enforced
+		// separately by the context tracker. Keep the token cap equal to the
+		// largest session window so it never blocks a request the API would
+		// have accepted.
+		singleRequestLimit: 1048576,
+		multiTierContext: { default: 1048576, allegretto: 1048576 },
 	},
 	{
 		id: 'kimi-k2.7-code',

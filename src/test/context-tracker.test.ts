@@ -1,5 +1,5 @@
 import * as assert from 'assert';
-import { SessionContextTracker, estimateTextTokens, estimateRequestBodyBytes, formatBytes, DEFAULT_MAX_BODY_BYTES } from '../context-tracker';
+import { SessionContextTracker, estimateRequestBodyBytes, formatBytes, DEFAULT_MAX_BODY_BYTES } from '../context-tracker';
 
 suite('SessionContextTracker', () => {
 	test('estimates text message tokens', () => {
@@ -9,7 +9,7 @@ suite('SessionContextTracker', () => {
 			errorThreshold: 0.95,
 		});
 		const estimate = tracker.estimate([{ role: 'user', content: 'hello world' }]);
-		assert.strictEqual(estimate.tokens, estimateTextTokens('hello world') + 4);
+		assert.strictEqual(estimate.tokens, Math.ceil('hello world'.length / 3.5) + 4);
 		assert.strictEqual(estimate.limit, 1000);
 		assert.strictEqual(estimate.status, 'ok');
 	});
@@ -85,16 +85,16 @@ suite('SessionContextTracker', () => {
 		assert.strictEqual(tracker.getEffectiveLimit(), 262144);
 	});
 
-	test('per-request cap stays at 262144 on a 1M subscription', () => {
+	test('per-request cap follows the 1M session window', () => {
 		const tracker = new SessionContextTracker({
 			maxInputTokens: 1048576,
-			singleRequestLimit: 262144,
+			singleRequestLimit: 1048576,
 			serverContextLength: 1048576,
 			warningThreshold: 0.8,
 			errorThreshold: 0.95,
 		});
 		assert.strictEqual(tracker.getEffectiveLimit(), 1048576);
-		assert.strictEqual(tracker.getRequestLimit(), 262144);
+		assert.strictEqual(tracker.getRequestLimit(), 1048576);
 	});
 
 	test('per-request cap shrinks with a smaller server window', () => {
@@ -142,19 +142,6 @@ suite('SessionContextTracker', () => {
 			},
 		]);
 		assert.ok(estimate.tokens >= 1024 + 4 + 4);
-	});
-
-	test('formatStatus reflects status', () => {
-		const tracker = new SessionContextTracker({
-			maxInputTokens: 1000,
-			warningThreshold: 0.8,
-			errorThreshold: 0.95,
-		});
-		const ok = tracker.estimate([{ role: 'user', content: 'hi' }]);
-		assert.ok(!tracker.formatStatus(ok).includes('warning'));
-
-		const exceeded = tracker.estimate([{ role: 'user', content: 'a'.repeat(5000) }]);
-		assert.ok(tracker.formatStatus(exceeded).includes('error'));
 	});
 
 	suite('request body byte limit (2 MiB API cap)', () => {

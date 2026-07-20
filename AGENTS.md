@@ -11,13 +11,23 @@ VS Code extension that registers **Kimi K2/K2.7 Code** models as custom `Languag
 | Launch extension | `F5` (Extension Development Host) |
 | Package .vsix | `npx @vscode/vsce package --no-dependencies` |
 
+## Versioning (REQUIRED on every local release)
+
+**Always bump `version` in `package.json` before packaging a `.vsix` for local install.** VS Code caches extensions by version — reinstalling the same version number may keep the old build, so the new code silently won't load.
+
+Rules:
+- Bump the **patch** number for every local test build (`1.8.0` → `1.8.1` → `1.8.2`…). Use minor/major only for real public releases.
+- The `.vsix` filename embeds the version, so a fresh number makes it obvious which build is installed.
+- Verify with `code --list-extensions --show-versions | findstr kimi` after `code --install-extension --force`.
+- Update `CHANGELOG.md` under a matching version heading (or an `Unreleased` section) when the change is user-facing.
+
 ## Supported Models
 
-K3 uses `kimi-k3`, up to 1M context, `max_completion_tokens`, and `reasoning_effort`. It always has thinking enabled, omits K2.x fixed sampling parameters, and accepts image data as base64 content parts. Note that while the model can support up to 1M context on higher tiers, the Kimi Code API rejects a single request that exceeds **262,144 tokens** (prompt + history + files).
+K3 uses `kimi-k3`, up to 1M context, `max_completion_tokens`, and `reasoning_effort`. It always has thinking enabled, omits K2.x fixed sampling parameters, and accepts image data as base64 content parts. Live probing (2026-07-20) confirmed the API accepts a full 1M-token prompt on higher tiers — there is NO fixed per-request token cap below the context window. The only hard per-request stop is the **2 MiB request body limit** (no gzip/brotli support), which the context tracker enforces as a byte guard.
 
 | Picker ID | API Model | Context | Notes |
 |---|---|---|---|
-| `kimi-k3` | `kimi-k3` | 256K default, 1M with Allegretto+ | Native vision, tool calling, reasoning effort; **per-request limit is 262144 tokens** |
+| `kimi-k3` | `kimi-k3` | 1M (512K fallback before the /models catalog loads) | Native vision, tool calling, reasoning effort; **limited only by the 2 MiB request body** |
 | `kimi-k2.7-code` | `kimi-k2.7-code` | 256K | Default coding model, thinking required |
 | `kimi-k2.7-code-highspeed` | `kimi-k2.7-code-highspeed` | 256K | Faster output (~180 T/s) |
 | `kimi-k2.6` | `kimi-k2.6` | 256K | Multimodal + thinking |
@@ -65,6 +75,10 @@ Use `kimiCopilot.modelConfigs` to override settings per picker model. Example:
 ```
 
 Precedence: per-model config > global setting > hard-coded model default.
+
+### Transliterate optimizer (v1.8.0+)
+
+`kimiCopilot.modelConfigs.<model>.transliterate: true` transliterates Cyrillic request content to Latin before sending (in `provider.ts` after `convertMessages`, before the context estimator). Measured effect: 5.3 → 2.7 bytes/token, ~2× smaller request bodies for Cyrillic-heavy chats — delays hitting the 2 MiB body cap. K3 answers in Russian anyway. Implementation: `src/transliterate.ts` (GOST-style mapping, fast-path skips pure-ASCII, images/tool ids/names untouched). Default: off.
 
 ## K2.7 API Constraints
 

@@ -2,7 +2,7 @@
   "name": "kimi-copilot-provider",
   "displayName": "Kimi Copilot Provider",
   "description": "Use Kimi K3 and K2.x models in GitHub Copilot Chat — Thinking/reasoning display, vision, tool calling, zero config. 🎁 New to Kimi? Subscribe via referral and we both get up to 1-Year Membership Credits: https://kimi-bot.com/activities/viral-referral/share?scenario=subscribe&from=share_poster&invitation_code=ZKH245",
-  "version": "1.7.0",
+  "version": "1.8.5",
   "publisher": "kimi-ext",
   "license": "MIT",
   "icon": "icon.png",
@@ -99,15 +99,10 @@
           "default": "",
           "description": "DEPRECATED: API key is now stored securely via the 'Kimi Copilot: Set API Key' command."
         },
-        "kimiCopilot.baseUrl": {
-          "type": "string",
-          "default": "https://api.kimi.com",
-          "description": "Base URL for the Kimi API. Change for self-hosted or proxied deployments."
-        },
         "kimiCopilot.endpoint": {
           "type": "string",
           "default": "https://api.kimi.com/coding/v1/chat/completions",
-          "description": "Full Kimi API endpoint URL. Overrides baseUrl when set to a non-default value."
+          "description": "Full Kimi API endpoint URL."
         },
         "kimiCopilot.modelIdOverrides": {
           "type": "object",
@@ -199,6 +194,15 @@
               "toolCalling": {
                 "type": "boolean",
                 "description": "Enable tool calling for this model."
+              },
+              "transliterate": {
+                "type": "boolean",
+                "default": false,
+                "description": "Transliterate Cyrillic text in requests to Latin before sending. Roughly halves the request body for Cyrillic-heavy chats (the API caps bodies at 2 MiB) without quality loss — K3 understands transliterated Russian. Overrides the global kimiCopilot.transliterate."
+              },
+              "transliterateSystemPrompt": {
+                "type": "string",
+                "description": "Custom instruction appended to the system prompt when transliteration is on (e.g. forcing the reply language). Applied on the next request — no reload needed. Overrides the global kimiCopilot.transliterateSystemPrompt."
               }
             },
             "additionalProperties": false
@@ -216,7 +220,8 @@
           "default": 0,
           "minimum": 0,
           "maximum": 1048576,
-          "description": "Maximum output tokens per response. K3 uses max_completion_tokens. Typical agent maximum is 32768; set to 0 for model default."
+          "deprecationMessage": "Global setting is deprecated — use kimiCopilot.modelConfigs.<model>.maxOutputTokens instead. K3 uses max_completion_tokens; the model default is 32768.",
+          "description": "Maximum output tokens per response. Set to 0 for the model default."
         },
         "kimiCopilot.topP": {
           "type": "number",
@@ -249,6 +254,16 @@
           "type": "boolean",
           "default": true,
           "description": "Enable SSE streaming responses."
+        },
+        "kimiCopilot.transliterate": {
+          "type": "boolean",
+          "default": false,
+          "description": "Transliterate Cyrillic text in requests to Latin before sending. Roughly halves the request body for Cyrillic-heavy chats (the API caps bodies at 2 MiB) without quality loss — K3 understands transliterated Russian and still answers in Russian. Can be overridden per model via kimiCopilot.modelConfigs.<model>.transliterate."
+        },
+        "kimiCopilot.transliterateSystemPrompt": {
+          "type": "string",
+          "default": "",
+          "description": "Custom instruction appended to the system prompt when transliteration is on (e.g. forcing the reply language). Applied on the next request — no reload needed. Leave empty to use the built-in default. Can be overridden per model via kimiCopilot.modelConfigs.<model>.transliterateSystemPrompt."
         },
         "kimiCopilot.systemPrompt": {
           "type": "string",
@@ -303,6 +318,7 @@
             "allegro",
             "vivace"
           ],
+          "deprecationMessage": "The server /models catalog resolves the context window per subscription automatically — this hint is only a fallback before the first successful fetch.",
           "description": "Your Kimi plan. Used to pick the correct context limit for multi-tier models like K3."
         }
       }

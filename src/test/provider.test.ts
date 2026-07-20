@@ -11,12 +11,12 @@ suite('provider helpers', () => {
             const model = MODELS.find((item) => item.id === 'kimi-k3');
             assert.ok(model);
             assert.strictEqual(model.requestPolicy, 'k3');
-            assert.strictEqual(model.maxInputTokens, 262144);
+            assert.strictEqual(model.maxInputTokens, 1048576);
             assert.strictEqual(model.maxOutputTokens, 32768);
             assert.strictEqual(model.capabilities.imageInput, true);
             assert.strictEqual(model.defaults?.reasoningEffort, 'max');
-            assert.strictEqual(model.singleRequestLimit, 262144);
-            assert.deepStrictEqual(model.multiTierContext, { default: 262144, allegretto: 1048576 });
+            assert.strictEqual(model.singleRequestLimit, 1048576);
+            assert.deepStrictEqual(model.multiTierContext, { default: 1048576, allegretto: 1048576 });
         });
 
         test('builds a K3 request without K2-only parameters', () => {
@@ -314,9 +314,10 @@ suite('provider helpers', () => {
             assert.ok(k3);
             assert.strictEqual(k3.maxInputTokens, 1048576);
             assert.strictEqual(k3.serverContextLength, 1048576);
-            // The per-request API cap does NOT grow with the context window.
-            assert.strictEqual(k3.singleRequestLimit, 262144);
-            assert.deepStrictEqual(k3.multiTierContext, { default: 262144, allegretto: 1048576 });
+            // The per-request cap follows the context window (no fixed cap
+            // below it) and is clamped by the server window when smaller.
+            assert.strictEqual(k3.singleRequestLimit, 1048576);
+            assert.deepStrictEqual(k3.multiTierContext, { default: 1048576, allegretto: 1048576 });
         });
 
         test('per-request cap shrinks with a smaller server window', () => {
@@ -349,9 +350,9 @@ suite('provider helpers', () => {
             ]);
             const k3 = merged.find((m) => m.id === 'kimi-k3');
             assert.ok(k3);
-            assert.strictEqual(k3.maxInputTokens, 262144);
+            assert.strictEqual(k3.maxInputTokens, 1048576);
             assert.strictEqual(k3.serverContextLength, undefined);
-            assert.strictEqual(k3.singleRequestLimit, 262144);
+            assert.strictEqual(k3.singleRequestLimit, 1048576);
         });
 
         test('server supports_thinking_type and default_effort are applied', () => {

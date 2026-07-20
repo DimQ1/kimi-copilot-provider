@@ -3,6 +3,7 @@ import { ConfigurationManager } from './config';
 import { SessionContextTracker, formatBytes } from './context-tracker';
 import { MODELS, toChatInfo, getModelCapabilities, getMaxOutputTokens, getModelDefaults, findModelById, applyServerModelCatalog, getEffectiveModels } from './models';
 import { fetchKimiModels } from './models-client';
+import { transliterateMessages } from './transliterate';
 import { UsageTracker, hasUsage } from './usage';
 import type { KimiContentPart, KimiMessage, KimiTool, KimiToolCall, KimiRequest, KimiStreamChunk, ModelDefaults, ModelConfigOverride } from './types';
 
@@ -10,8 +11,16 @@ import type { KimiContentPart, KimiMessage, KimiTool, KimiToolCall, KimiRequest,
 // Constants
 // ═══════════════════════════════════════════════════════════════════════
 
-const DEFAULT_ENDPOINT = 'https://api.kimi.com/coding/v1/chat/completions';
 const DEFAULT_MODELS_ENDPOINT = 'https://api.kimi.com/coding/v1/models';
+
+/**
+ * Appended to the system prompt when the transliterate optimizer is on.
+ * When the user enabled transliteration, the request is sent transliterated
+ * to Latin — so the reply must always be in proper Russian (Cyrillic), never
+ * mirrored transliteration. Appended as a strong, explicit instruction.
+ */
+const TRANSLITERATE_REPLY_INSTRUCTION =
+    'CRITICAL LANGUAGE RULE: reply on russian language. The user has enabled Cyrillic transliteration for their messages, so you will receive Russian text written in Latin (transliterated) characters. Regardless of this, you MUST always write your entire reply in proper Russian using Cyrillic characters. NEVER answer in transliterated (Latin) Russian — always respond in correct Cyrillic Russian.';
 
 // ═══════════════════════════════════════════════════════════════════════
 // Provider class — implements the non-generic LanguageModelChatProvider
@@ -90,11 +99,6 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
         return DEFAULT_MODELS_ENDPOINT;
     }
 
-    /** Access the local usage tracker for status bar / commands. */
-    getUsageTracker(): UsageTracker {
-        return this.usageTracker;
-    }
-
     // ── Model information ──────────────────────────────────────────
 
     async provideLanguageModelChatInformation(
@@ -159,7 +163,7 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
             );
         }
 
-        const endpoint = this.configManager.getEndpoint() || DEFAULT_ENDPOINT;
+        const endpoint = this.configManager.getEndpoint();
         const modelName = this.configManager.getApiModelId(modelInfo.id);
         const modelConfig = this.configManager.getModelConfig(modelInfo.id);
         const modelDefaults = getModelDefaults(modelInfo.id);
@@ -207,7 +211,18 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
 
         const enableStreaming = extras?.testMode ? false : this.configManager.getEnableStreaming();
         const timeout = this.configManager.getTimeout();
-        const systemPrompt = this.configManager.getSystemPrompt(modelInfo.id);
+        const transliterate = this.configManager.getTransliterate(modelInfo.id);
+        let systemPrompt = this.configManager.getSystemPrompt(modelInfo.id);
+        if (transliterate) {
+            // Transliteration is enabled, so the reply must always be in
+            // proper Russian (Cyrillic) — never mirrored transliteration.
+            // A custom instruction can be set without a reload via
+            // kimiCopilot.transliterateSystemPrompt (per-model or global).
+            const replyInstruction =
+                this.configManager.getTransliterateSystemPrompt(modelInfo.id) ??
+                TRANSLITERATE_REPLY_INSTRUCTION;
+            systemPrompt = `${systemPrompt}\n\n${replyInstruction}`;
+        }
 
         const capabilities = getModelCapabilities(modelInfo.id);
         const toolCallingEnabled = modelConfig.toolCalling ?? capabilities?.toolCalling ?? false;
@@ -216,6 +231,18 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
         const allMessages = convertMessages(messages);
         if (!allMessages.some((m) => m.role === 'system')) {
             allMessages.unshift({ role: 'system', content: systemPrompt });
+        }
+
+        // Optional context optimizer: transliterate Cyrillic → Latin. This
+        // roughly halves the request body for Cyrillic-heavy chats (5.3 →
+        // 2.7 bytes/token measured) and delays hitting the 2 MiB body cap.
+        // The estimator below runs AFTER transliteration, so its byte count
+        // reflects what is actually sent.
+        if (transliterate) {
+            const changed = transliterateMessages(allMessages);
+            if (changed > 0) {
+                this.outputChannel.info(`Transliterate: converted Cyrillic content in ${changed} message(s).`);
+            }
         }
 
         // Estimate and guard against context limits. The server-resolved
@@ -601,7 +628,7 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
             case 400:
                 if (this.isContextLengthError(status, body)) {
                     return new vscode.LanguageModelError(
-                        'The Kimi Code API rejected this request because it exceeds the per-request token limit (262144 tokens), regardless of your subscription context window. Start a new chat session, run "/compact", or remove files from the context.',
+                        'The Kimi Code API rejected this request because it exceeds the per-request token limit, regardless of your subscription context window. Start a new chat session, run "/compact", or remove files from the context.',
                     );
                 }
                 return new vscode.LanguageModelError(

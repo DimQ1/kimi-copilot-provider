@@ -103,10 +103,6 @@ export class UsageTracker {
 		this._onDidChange.fire();
 	}
 
-	getContextStats(): ContextStats | null {
-		return this.contextStats;
-	}
-
 	/** One-line summary for the status bar. */
 	getStatusBarText(): string {
 		if (this.contextStats) {
@@ -126,38 +122,6 @@ export class UsageTracker {
 			return `$(graph) ${percent}% used (${remaining} left)`;
 		}
 		return `$(graph) ${this.formatCompact(this.stats.totalTokens)} tokens • ${this.stats.requestCount} req`;
-	}
-
-	/** Multi-line summary for messages / hover. */
-	getFormattedStats(): string {
-		const lines = [
-			`Requests: ${this.stats.requestCount}`,
-			`Prompt tokens: ${this.formatNumber(this.stats.promptTokens)}`,
-			`Completion tokens: ${this.formatNumber(this.stats.completionTokens)}`,
-			`Total tokens: ${this.formatNumber(this.stats.totalTokens)}`,
-			`Cached tokens: ${this.formatNumber(this.stats.cachedTokens)}`,
-		];
-		if (this.contextStats) {
-			const { ratio, status } = this.contextStats;
-			const percent = Math.round(ratio * 100);
-			lines.push(`Context: ${this.formatNumber(this.contextStats.tokens)}/${this.formatNumber(this.contextStats.limit)} (${percent}% — ${status})`);
-		}
-		const summary = this.quota?.summary;
-		if (summary && summary.limit > 0) {
-			const percent = Math.round((summary.used / summary.limit) * 100);
-			lines.push(`Quota: ${summary.used}/${summary.limit} (${percent}% used)`);
-			if (summary.resetHint) lines.push(`Resets: ${summary.resetHint}`);
-		}
-		for (const limit of this.quota?.limits ?? []) {
-			if (limit.limit > 0) {
-				const percent = Math.round((limit.used / limit.limit) * 100);
-				lines.push(`${limit.label}: ${limit.used}/${limit.limit} (${percent}% used)`);
-			}
-		}
-		if (this.quotaError) {
-			lines.push(`Quota error: ${this.quotaError}`);
-		}
-		return lines.join('  \u2502  ');
 	}
 
 	/**
