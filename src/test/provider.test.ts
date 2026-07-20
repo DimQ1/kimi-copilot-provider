@@ -2,6 +2,7 @@ import * as assert from 'assert';
 import * as vscode from 'vscode';
 import { buildKimiRequest, convertMessages, convertTools, extractTextContent, resolveReasoningEffort, formatThinkingAsText, tryReportThinkingPart } from '../provider';
 import { MODELS, toChatInfo } from '../models';
+import { applyServerModels } from '../models-client';
 import type { KimiTool } from '../types';
 
 suite('provider helpers', () => {
@@ -294,6 +295,63 @@ suite('provider helpers', () => {
             });
 
             assert.strictEqual(request.reasoning_effort, 'max');
+        });
+    });
+
+    suite('applyServerModels context limits', () => {
+        test('server context_length becomes the source of truth', () => {
+            const merged = applyServerModels(MODELS, [
+                {
+                    id: 'k3',
+                    contextLength: 1048576,
+                    supportsReasoning: true,
+                    supportsImageIn: true,
+                    supportsVideoIn: true,
+                    supportsToolUse: true,
+                },
+            ]);
+            const k3 = merged.find((m) => m.id === 'kimi-k3');
+            assert.ok(k3);
+            assert.strictEqual(k3.maxInputTokens, 1048576);
+            assert.strictEqual(k3.serverContextLength, 1048576);
+            // The per-request API cap does NOT grow with the context window.
+            assert.strictEqual(k3.singleRequestLimit, 262144);
+            assert.deepStrictEqual(k3.multiTierContext, { default: 262144, allegretto: 1048576 });
+        });
+
+        test('per-request cap shrinks with a smaller server window', () => {
+            const merged = applyServerModels(MODELS, [
+                {
+                    id: 'k3',
+                    contextLength: 131072,
+                    supportsReasoning: true,
+                    supportsImageIn: true,
+                    supportsVideoIn: true,
+                    supportsToolUse: true,
+                },
+            ]);
+            const k3 = merged.find((m) => m.id === 'kimi-k3');
+            assert.ok(k3);
+            assert.strictEqual(k3.serverContextLength, 131072);
+            assert.strictEqual(k3.singleRequestLimit, 131072);
+        });
+
+        test('models without a server entry keep hard-coded limits', () => {
+            const merged = applyServerModels(MODELS, [
+                {
+                    id: 'kimi-for-coding',
+                    contextLength: 262144,
+                    supportsReasoning: true,
+                    supportsImageIn: false,
+                    supportsVideoIn: false,
+                    supportsToolUse: true,
+                },
+            ]);
+            const k3 = merged.find((m) => m.id === 'kimi-k3');
+            assert.ok(k3);
+            assert.strictEqual(k3.maxInputTokens, 262144);
+            assert.strictEqual(k3.serverContextLength, undefined);
+            assert.strictEqual(k3.singleRequestLimit, 262144);
         });
     });
 });

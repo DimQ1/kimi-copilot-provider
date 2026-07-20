@@ -24,6 +24,8 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
 
     private readonly outputChannel: vscode.LogOutputChannel;
     private readonly disposables: vscode.Disposable[] = [];
+    /** Guards against repeatedly triggering compaction within one session. */
+    private autoCompactTriggered = false;
 
     constructor(
         private readonly configManager: ConfigurationManager,
@@ -207,29 +209,33 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
             allMessages.unshift({ role: 'system', content: systemPrompt });
         }
 
-        // Estimate and guard against session context limits.
+        // Estimate and guard against context limits. The server-resolved
+        // context window (per subscription) is the source of truth; the
+        // per-request API cap is enforced separately inside tracker.check().
         const tracker = new SessionContextTracker({
             maxInputTokens: modelConfig.maxInputTokens ?? modelInfo.maxInputTokens,
             singleRequestLimit: modelDefinition?.singleRequestLimit,
             multiTierContext: modelDefinition?.multiTierContext,
+            serverContextLength: modelDefinition?.serverContextLength,
             warningThreshold: this.configManager.getContextWarningThreshold(),
             errorThreshold: this.configManager.getContextErrorThreshold(),
             plan: this.configManager.getPlan(),
         });
         const estimate = tracker.estimate(allMessages);
         this.outputChannel.info(
-            `Context estimate: ~${estimate.tokens.toLocaleString('en-US')} / ${estimate.limit.toLocaleString('en-US')} tokens (${Math.round(estimate.ratio * 100)}%)`,
+            `Context estimate: ~${estimate.tokens.toLocaleString('en-US')} / ${estimate.limit.toLocaleString('en-US')} tokens (${Math.round(estimate.ratio * 100)}%), per-request cap ${tracker.getRequestLimit().toLocaleString('en-US')}`,
         );
-        if (estimate.status === 'exceeded' || estimate.status === 'critical') {
-            const guidance = estimate.status === 'exceeded'
-                ? 'Start a new chat session, run "/compact", or remove files from the context.'
-                : 'The context is almost full. Consider starting a new chat session or running "/compact" soon.';
-            const planHint = modelDefinition?.multiTierContext
-                ? ' Allegretto+ users can configure up to 1M context via settings, but a single request still cannot exceed 262144 tokens.'
-                : '';
+        try {
+            tracker.check(allMessages);
+        } catch (err) {
             this.usageTracker.setContextStats(estimate);
-            throw new vscode.LanguageModelError(
-                `Kimi context ${estimate.status}: ~${estimate.tokens.toLocaleString('en-US')} / ${estimate.limit.toLocaleString('en-US')} tokens.${planHint}\n\n${guidance}`,
+            // Fallback: compact the conversation so the user can resend.
+            this.triggerAutoCompact('local', true);
+            throw err;
+        }
+        if (estimate.status === 'critical') {
+            this.outputChannel.warn(
+                'The context is almost full. Consider starting a new chat session or running "/compact" soon.',
             );
         }
 
@@ -280,6 +286,19 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
 
             if (!response.ok) {
                 const errText = await response.text().catch(() => 'unknown');
+                // A context-length rejection may mean the subscription tier
+                // changed since the last catalog fetch (e.g. downgrade from
+                // Allegretto+ to Moderato). Refresh /models in the background
+                // so the next request uses the server-resolved limits.
+                if (this.isContextLengthError(response.status, errText)) {
+                    this.outputChannel.warn(
+                        'Server rejected the request for context length; refreshing model catalog in the background.',
+                    );
+                    void this.refreshModelsFromServer();
+                    // Fallback: compact the conversation and ask the user to
+                    // resend — the rejected request was dropped by the server.
+                    this.triggerAutoCompact('api', true);
+                }
                 throw this.toLanguageModelError(response.status, errText);
             }
 
@@ -388,7 +407,76 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
         }
     }
 
+    // ── Auto-compact fallback ────────────────────────────────────────
+
+    /**
+     * Triggers Copilot Chat compaction (/compact) once per session and warns
+     * the user. Controlled by `kimiCopilot.autoCompactOnLimit` (default on).
+     *
+     * @param reason  What triggered the fallback ('api' = server rejected the
+     *                request, 'local' = pre-flight estimate exceeded the cap).
+     * @param resend  When true, ask the user to resend the request after
+     *                compaction finishes (the rejected request was dropped).
+     */
+    private triggerAutoCompact(reason: 'api' | 'local', resend: boolean): void {
+        if (!this.configManager.getAutoCompactOnLimit()) {
+            return;
+        }
+        if (this.autoCompactTriggered) {
+            this.outputChannel.info('Auto-compact already triggered this session; skipping.');
+            return;
+        }
+        this.autoCompactTriggered = true;
+
+        const source =
+            reason === 'api'
+                ? 'The Kimi API rejected the request because it exceeded the token limit.'
+                : 'The request exceeds the per-request token limit.';
+        const followUp = resend
+            ? ' Resend your message once compaction finishes.'
+            : '';
+        void vscode.window.showWarningMessage(
+            `Kimi Copilot: ${source} Compacting the conversation with /compact…${followUp}`,
+        );
+
+        // `github.copilot.chat.compact` is the command registered by the
+        // GitHub Copilot Chat extension for its /compact feature. It may be
+        // unavailable (extension disabled, older version), so check first.
+        void vscode.commands.getCommands(true).then((all) => {
+            if (all.includes('github.copilot.chat.compact')) {
+                this.outputChannel.warn(
+                    `Auto-compact triggered (${reason}): running github.copilot.chat.compact`,
+                );
+                void vscode.commands.executeCommand('github.copilot.chat.compact');
+            } else {
+                this.outputChannel.warn(
+                    'github.copilot.chat.compact is not available; ask the user to run /compact manually.',
+                );
+                void vscode.window.showWarningMessage(
+                    'Kimi Copilot: automatic compaction is unavailable. Please run "/compact" in the Chat input manually.',
+                );
+            }
+        });
+    }
+
     // ── Error mapping ───────────────────────────────────────────────
+
+    /**
+     * Detects the Kimi Code API "request exceeded model token limit"
+     * rejection (HTTP 400 with a context-length marker in the body).
+     */
+    private isContextLengthError(status: number, body: string): boolean {
+        if (status !== 400) {
+            return false;
+        }
+        const text = body.toLowerCase();
+        return (
+            text.includes('context_length_exceeded') ||
+            text.includes('token limit') ||
+            text.includes('context length') ||
+            text.includes('maximum context')
+        );
+    }
 
     private toLanguageModelError(status: number, body: string): vscode.LanguageModelError {
         switch (status) {
@@ -407,6 +495,15 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
             case 429:
                 return new vscode.LanguageModelError(
                     'Kimi API rate limit exceeded (429). Retry later.',
+                );
+            case 400:
+                if (this.isContextLengthError(status, body)) {
+                    return new vscode.LanguageModelError(
+                        'The Kimi Code API rejected this request because it exceeds the per-request token limit (262144 tokens), regardless of your subscription context window. Start a new chat session, run "/compact", or remove files from the context.',
+                    );
+                }
+                return new vscode.LanguageModelError(
+                    `Kimi API error ${status}: ${body.slice(0, 300)}`,
                 );
             case 500:
             case 502:

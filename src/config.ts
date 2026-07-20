@@ -188,6 +188,14 @@ export class ConfigurationManager {
 		return Math.max(0, Math.min(1, value));
 	}
 
+	/**
+	 * When true, a request that exceeds the token limit automatically triggers
+	 * Copilot Chat compaction (/compact) with a user-visible warning.
+	 */
+	getAutoCompactOnLimit(): boolean {
+		return this.config.get<boolean>('autoCompactOnLimit', true);
+	}
+
 	/** Optional user plan hint used to pick multi-tier context limits. */
 	getPlan(): string | undefined {
 		return this.config.get<string>('plan', '');

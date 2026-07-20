@@ -24,11 +24,20 @@ export interface SessionContextTrackerOptions {
 	singleRequestLimit?: number;
 	/** Multi-tier limits if the user is on a higher plan. */
 	multiTierContext?: { default: number; allegretto: number };
+	/**
+	 * Context window resolved by the server (`context_length` from GET /models)
+	 * for the current subscription. When present, this is the source of truth
+	 * and takes precedence over the manual `plan` hint.
+	 */
+	serverContextLength?: number;
 	/** Ratio at which we warn the user (0..1). */
 	warningThreshold: number;
 	/** Ratio at which we refuse to send the request (0..1). */
 	errorThreshold: number;
-	/** Plan hint from the user (e.g. 'moderato', 'allegretto', 'allegro', 'vivace'). */
+	/**
+	 * Plan hint from the user (e.g. 'moderato', 'allegretto', 'allegro', 'vivace').
+	 * Fallback only — used when the server catalog has not been fetched yet.
+	 */
 	plan?: string;
 }
 
@@ -78,11 +87,23 @@ export class SessionContextTracker {
 	}
 
 	/**
-	 * Returns the effective input token limit for the active model/plan.
-	 * Moderato users are capped at singleRequestLimit; higher plans can use the
-	 * full context window from multiTierContext.allegretto.
+	 * Returns the session context window for the active model/subscription.
+	 * This is the value shown to the user and used for threshold warnings —
+	 * NOT the per-request cap (see {@link getRequestLimit}).
+	 *
+	 * Precedence (mirrors the official Kimi Code CLI):
+	 * 1. `serverContextLength` — per-subscription value from GET /models.
+	 * 2. `multiTierContext.allegretto` — when the user manually set a higher
+	 *    plan hint and the server catalog has not been fetched yet.
+	 * 3. `singleRequestLimit` / `maxInputTokens` — hard-coded fallback.
 	 */
 	getEffectiveLimit(): number {
+		if (
+			this.options.serverContextLength !== undefined &&
+			this.options.serverContextLength > 0
+		) {
+			return this.options.serverContextLength;
+		}
 		const plan = this.options.plan?.toLowerCase() ?? '';
 		if (this.options.multiTierContext) {
 			if (plan === 'allegretto' || plan === 'allegro' || plan === 'vivace') {
@@ -90,6 +111,18 @@ export class SessionContextTracker {
 			}
 		}
 		return this.options.singleRequestLimit ?? this.options.maxInputTokens;
+	}
+
+	/**
+	 * Returns the hard per-request token cap (prompt + history + files).
+	 * The Kimi Code API rejects any single request above 262144 tokens, even
+	 * when the subscription context window is 1M. The cap never exceeds the
+	 * session context window.
+	 */
+	getRequestLimit(): number {
+		const sessionLimit = this.getEffectiveLimit();
+		const perRequest = this.options.singleRequestLimit ?? sessionLimit;
+		return Math.min(perRequest, sessionLimit);
 	}
 
 	/**
@@ -115,16 +148,30 @@ export class SessionContextTracker {
 	/**
 	 * Checks whether the request can proceed. Throws a LanguageModelError with
 	 * actionable guidance when the context is exceeded or critically full.
+	 *
+	 * Two distinct limits are enforced:
+	 * - the session context window (estimate.status) — start a new chat;
+	 * - the per-request API cap ({@link getRequestLimit}) — even a 1M plan
+	 *   cannot send more than 262144 tokens in one request.
 	 */
 	check(messages: KimiMessage[]): ContextEstimate {
 		const estimate = this.estimate(messages);
+		const requestLimit = this.getRequestLimit();
+
+		if (estimate.tokens >= requestLimit) {
+			const sessionLimit = estimate.limit;
+			const tierHint =
+				sessionLimit > requestLimit
+					? ` Your subscription context window is ${sessionLimit.toLocaleString('en-US')} tokens, but the Kimi Code API rejects any single request above ${requestLimit.toLocaleString('en-US')} tokens.`
+					: '';
+			throw new vscode.LanguageModelError(
+				`Kimi per-request limit exceeded: ~${estimate.tokens.toLocaleString('en-US')} tokens in one request, the API cap is ${requestLimit.toLocaleString('en-US')}.${tierHint}\n\nStart a new chat session, run "/compact", or remove files from the context.`,
+			);
+		}
 
 		if (estimate.status === 'exceeded') {
-			const planHint = this.options.multiTierContext
-				? ' On Allegretto+ the model supports up to 1M context, but a single request still cannot exceed 262144 tokens.'
-				: '';
 			throw new vscode.LanguageModelError(
-				`Kimi context limit exceeded: ~${estimate.tokens.toLocaleString('en-US')} tokens estimated, limit is ${estimate.limit.toLocaleString('en-US')}.${planHint}\n\nStart a new chat session, run "/compact", or remove files from the context.`,
+				`Kimi context limit exceeded: ~${estimate.tokens.toLocaleString('en-US')} tokens estimated, the session context window is ${estimate.limit.toLocaleString('en-US')}.\n\nStart a new chat session, run "/compact", or remove files from the context.`,
 			);
 		}
 

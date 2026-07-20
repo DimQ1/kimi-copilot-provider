@@ -269,6 +269,11 @@
           "maximum": 1,
           "description": "Ratio of context window usage at which to refuse the request and suggest starting a new session."
         },
+        "kimiCopilot.autoCompactOnLimit": {
+          "type": "boolean",
+          "default": true,
+          "description": "When a request exceeds the token limit, automatically trigger Copilot Chat compaction (/compact) and show a warning. The user is notified only once per session."
+        },
         "kimiCopilot.plan": {
           "type": "string",
           "default": "",

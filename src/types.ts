@@ -181,6 +181,12 @@ export interface ModelDefinition {
 	singleRequestLimit?: number;
 	/** Optional multi-tier context limits for higher subscription plans. */
 	multiTierContext?: { default: number; allegretto: number };
+	/**
+	 * Context window resolved by the server (`context_length` from GET /models)
+	 * for the current subscription. Set only after a successful catalog fetch;
+	 * takes precedence over the manual plan hint in the context tracker.
+	 */
+	serverContextLength?: number;
 }
 
 export interface KimiModelsResponse {

@@ -175,8 +175,10 @@ export function applyServerModels(
 
 		const next: ModelDefinition = { ...local, capabilities: { ...local.capabilities } };
 
-		// Context window comes from the server (per-subscription value).
+		// Context window comes from the server (per-subscription value) and is
+		// the source of truth for the session limit — no manual plan hint needed.
 		next.maxInputTokens = server.contextLength;
+		next.serverContextLength = server.contextLength;
 		if (local.multiTierContext) {
 			// The per-request cap never exceeds the context window.
 			next.multiTierContext = {
@@ -185,6 +187,9 @@ export function applyServerModels(
 			};
 		}
 		if (local.singleRequestLimit !== undefined) {
+			// The per-request API cap (262144) does NOT grow with the context
+			// window — even a 1M subscription rejects a single request above the
+			// cap. It only shrinks when the server window is smaller than the cap.
 			next.singleRequestLimit = Math.min(local.singleRequestLimit, server.contextLength);
 		}
 

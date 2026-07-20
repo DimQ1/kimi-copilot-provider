@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- The server-resolved `context_length` from `GET /models` is now the source of truth for the session context window (256K Moderato / 1M Allegretto+). The manual `kimiCopilot.plan` hint is only a fallback used before the first successful catalog fetch.
+- The per-request API cap (262144 tokens) is now tracked separately from the session context window: a 1M subscription still cannot send more than 262144 tokens in a single request, and the error message now says so explicitly.
+
+### Added
+- `SessionContextTracker.getRequestLimit()` — returns the hard per-request cap, clamped to the session window.
+- Automatic background refresh of the `/models` catalog when the API rejects a request for context length (HTTP 400) — picks up subscription tier changes (e.g. downgrade from Allegretto+ to Moderato) without a manual refresh.
+- A dedicated error message for HTTP 400 context-length rejections explaining the 262144 per-request cap.
+- **Auto-compact fallback** (`kimiCopilot.autoCompactOnLimit`, default `true`): when a request exceeds the token limit — either caught by the local pre-flight estimate or rejected by the API with HTTP 400 — the provider warns the user and runs `github.copilot.chat.compact` (the Copilot Chat `/compact` command) once per session, then asks the user to resend the message. Falls back to a manual `/compact` hint when the command is unavailable.
+- Unit tests covering: server context wins over the plan hint (both directions), per-request cap on a 1M plan, cap shrinking with a smaller server window, and `applyServerModels` propagating `serverContextLength`.
+
 ## [1.4.5] - 2026-07-18
 
 ### Fixed
