@@ -2,7 +2,7 @@
   "name": "kimi-copilot-provider",
   "displayName": "Kimi Copilot Provider",
   "description": "Use Kimi K3 and K2.x models in GitHub Copilot Chat — Thinking/reasoning display, vision, tool calling, zero config. 🎁 New to Kimi? Subscribe via referral and we both get up to 1-Year Membership Credits: https://kimi-bot.com/activities/viral-referral/share?scenario=subscribe&from=share_poster&invitation_code=ZKH245",
-  "version": "1.6.1",
+  "version": "1.6.2",
   "publisher": "kimi-ext",
   "license": "MIT",
   "icon": "icon.png",
