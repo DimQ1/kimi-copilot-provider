@@ -1,6 +1,6 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
-import { buildKimiRequest, convertMessages, convertTools, extractTextContent, resolveReasoningEffort } from '../provider';
+import { buildKimiRequest, convertMessages, convertTools, extractTextContent, resolveReasoningEffort, formatThinkingAsText, tryReportThinkingPart } from '../provider';
 import { MODELS, toChatInfo } from '../models';
 import type { KimiTool } from '../types';
 
@@ -195,6 +195,105 @@ suite('provider helpers', () => {
         test('returns empty string for empty content', () => {
             const msg = vscode.LanguageModelChatMessage.User([]);
             assert.strictEqual(extractTextContent(msg), '');
+        });
+    });
+
+    suite('thinking / reasoning display', () => {
+        test('formatThinkingAsText formats single-line reasoning', () => {
+            const result = formatThinkingAsText('I need to analyze this carefully.');
+            assert.ok(result.startsWith('> 💭 **Thinking**'));
+            assert.ok(result.includes('> I need to analyze this carefully.'));
+            assert.ok(result.includes('---'));
+        });
+
+        test('formatThinkingAsText formats multi-line reasoning', () => {
+            const result = formatThinkingAsText('Line 1\nLine 2\nLine 3');
+            assert.ok(result.startsWith('> 💭 **Thinking**'));
+            assert.ok(result.includes('> Line 1'));
+            assert.ok(result.includes('> Line 2'));
+            assert.ok(result.includes('> Line 3'));
+        });
+
+        test('formatThinkingAsText trims trailing whitespace', () => {
+            const result = formatThinkingAsText('  hello  ');
+            assert.ok(result.includes('> hello'));
+            assert.ok(!result.includes('  hello  '));
+        });
+
+        test('tryReportThinkingPart returns true and reports when constructor is available', () => {
+            const reported: unknown[] = [];
+            const fakeProgress = {
+                report: (value: unknown) => { reported.push(value); },
+            };
+
+            // If LanguageModelThinkingPart exists in this test runtime, use it
+            const result = tryReportThinkingPart(
+                fakeProgress as vscode.Progress<vscode.LanguageModelResponsePart>,
+                'test reasoning',
+            );
+
+            // In test env (which doesn't have proposals enabled), it falls back
+            if ((vscode as any).LanguageModelThinkingPart) {
+                assert.strictEqual(result, true);
+                assert.strictEqual(reported.length, 1);
+            } else {
+                // Fallback expected — no report, function returns false
+                assert.strictEqual(result, false);
+                assert.strictEqual(reported.length, 0);
+            }
+        });
+
+        test('buildKimiRequest for K2.x sends thinking when enabled', () => {
+            const request = buildKimiRequest({
+                model: 'kimi-k2.7-code',
+                messages: [{ role: 'user', content: 'hi' }],
+                stream: true,
+                requestPolicy: 'k2',
+                maxTokens: 1024,
+                temperature: 1.0,
+                topP: 0.95,
+                presencePenalty: 0,
+                frequencyPenalty: 0,
+                thinking: { type: 'enabled' },
+            });
+
+            assert.deepStrictEqual(request.thinking, { type: 'enabled' });
+            assert.strictEqual('reasoning_effort' in request, false);
+        });
+
+        test('buildKimiRequest for K3 sends reasoning_effort, not thinking', () => {
+            const request = buildKimiRequest({
+                model: 'kimi-k3',
+                messages: [{ role: 'user', content: 'hi' }],
+                stream: true,
+                requestPolicy: 'k3',
+                maxTokens: 1024,
+                temperature: 1.0,
+                topP: 0.95,
+                presencePenalty: 0,
+                frequencyPenalty: 0,
+                thinking: { type: 'enabled' },
+                reasoningEffort: 'high',
+            });
+
+            assert.strictEqual(request.reasoning_effort, 'high');
+            assert.strictEqual('thinking' in request, false);
+        });
+
+        test('buildKimiRequest for K3 defaults reasoning_effort to max', () => {
+            const request = buildKimiRequest({
+                model: 'kimi-k3',
+                messages: [{ role: 'user', content: 'hi' }],
+                stream: true,
+                requestPolicy: 'k3',
+                maxTokens: 1024,
+                temperature: 1.0,
+                topP: 0.95,
+                presencePenalty: 0,
+                frequencyPenalty: 0,
+            });
+
+            assert.strictEqual(request.reasoning_effort, 'max');
         });
     });
 });

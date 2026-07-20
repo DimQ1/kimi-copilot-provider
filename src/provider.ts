@@ -698,8 +698,13 @@ function getThinkingPartCtor(): typeof _thinkingPartCtor {
     return _thinkingPartCtor;
 }
 
+/** Format thinking content as a markdown blockquote for text fallback. */
+export function formatThinkingAsText(content: string): string {
+    return `${THINKING_HEADER}\n> ${content.trim().replace(/\n/g, '\n> ')}\n\n---\n\n`;
+}
+
 /** Try to report thinking content using the native VS Code part. Returns true on success. */
-function tryReportThinkingPart(
+export function tryReportThinkingPart(
     progress: vscode.Progress<vscode.LanguageModelResponsePart>,
     content: string,
 ): boolean {
@@ -713,11 +718,6 @@ function tryReportThinkingPart(
     } catch {
         return false;
     }
-}
-
-/** Format thinking content as a markdown blockquote for text fallback. */
-function formatThinkingAsText(content: string): string {
-    return `${THINKING_HEADER}\n> ${content.trim().replace(/\n/g, '\n> ')}\n\n---\n\n`;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -843,14 +843,21 @@ async function streamSSEResponse(
         }
     };
 
-    /** Attempt to report a reasoning delta natively; fall back to buffering. */
+    /** Attempt to report a reasoning delta as a native thinking part. Falls back to buffering on error. */
     const handleReasoningDelta = (text: string): void => {
-        // First call: probe whether LanguageModelThinkingPart is available
         if (thinkingPartAvailable === undefined) {
-            thinkingPartAvailable = tryReportThinkingPart(progress, text);
+            // Probe once: try reporting natively. If it works, mark as available.
+            // LanguageModelThinkingPart is a proposed API accessible at runtime
+            // when GitHub.copilot-chat (which has it enabled) renders the response.
+            // We do NOT declare it in enabledApiProposals — see package.json.
+            const success = tryReportThinkingPart(progress, text);
+            thinkingPartAvailable = success;
+            if (success) {
+                return; // already reported via tryReportThinkingPart
+            }
         }
         if (thinkingPartAvailable) {
-            // Already proven available — subsequent deltas use it directly
+            // Proven available — report each subsequent delta natively
             tryReportThinkingPart(progress, text);
         } else {
             // Fallback: buffer until we hit text content or stream end

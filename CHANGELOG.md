@@ -15,6 +15,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Added `stream_options: { include_usage: true }` to streaming chat completion requests so the status bar usage counter updates correctly.
 
+## [1.6.1] - 2026-07-20
+
+### Fixed
+- Removed `languageModelThinkingPart` from `enabledApiProposals` — the VS Code proposal gate was blocking third-party access. The class is available at runtime because `GitHub.copilot-chat` has it enabled.
+- Fixed duplicate reporting of the first `reasoning_content` delta in streaming responses (probe-then-report pattern, same approach as `deepseek-v4-for-copilot`).
+
+### Added
+- Unit tests for `formatThinkingAsText`, `tryReportThinkingPart`, and `buildKimiRequest` thinking parameters (K2.x `thinking` vs K3 `reasoning_effort`).
+
 ## [1.6.0] - 2026-07-20
 
 ### Added
