@@ -1,10 +1,10 @@
 import * as vscode from 'vscode';
 import { ConfigurationManager } from './config';
+import { ModelRegistry } from './model-registry';
 import { KimiChatProvider } from './provider';
 import { UsageTracker } from './usage';
 import { KimiUsageClient } from './usage-client';
-import { showUsageDetailsPanel } from './usage-webview';
-import { showUsageQuickPick } from './usage-popup';
+import { registerAllCommands } from './commands';
 
 const QUOTA_REFRESH_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
 const QUOTA_WARNING_THRESHOLD = 0.8;
@@ -12,8 +12,9 @@ const QUOTA_CRITICAL_THRESHOLD = 0.95;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
     const configManager = new ConfigurationManager(context.secrets, context.globalState);
+    const modelRegistry = new ModelRegistry();
     const usageTracker = new UsageTracker(context.globalState);
-    const provider = new KimiChatProvider(configManager, usageTracker);
+    const provider = new KimiChatProvider(configManager, usageTracker, modelRegistry);
     const usageClient = new KimiUsageClient();
 
     // Layer the cached server catalog (from a previous session) over the
@@ -42,7 +43,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         }),
     );
 
-    registerCommands(context, configManager, provider, usageTracker, usageClient);
+    registerAllCommands(context, configManager, provider, usageTracker, usageClient);
     startQuotaRefresh(context, configManager, usageTracker, usageClient);
 
     // Copilot Chat may serve cached model info. Activate it first so the
@@ -134,185 +135,6 @@ function notifyQuotaThresholds(usageTracker: UsageTracker): void {
     } else {
         void vscode.window.showWarningMessage(message);
     }
-}
-
-function registerCommands(
-    context: vscode.ExtensionContext,
-    configManager: ConfigurationManager,
-    provider: KimiChatProvider,
-    usageTracker: UsageTracker,
-    usageClient: KimiUsageClient,
-): void {
-    context.subscriptions.push(
-        vscode.commands.registerCommand('kimi-copilot.setApiKey', async () => {
-            const current = await configManager.getApiKey();
-            const value = await vscode.window.showInputBox({
-                prompt: 'Enter your Kimi API key (sk-kimi-...)',
-                value: current,
-                password: true,
-                ignoreFocusOut: true,
-                validateInput: (input) => {
-                    if (!input || input.trim().length === 0) {
-                        return 'API key cannot be empty';
-                    }
-                    return undefined;
-                },
-            });
-
-            if (value !== undefined) {
-                await configManager.setApiKey(value);
-                provider.refreshModelPicker();
-                void provider.refreshModelsFromServer();
-                vscode.window.showInformationMessage('Kimi API key saved securely.');
-            }
-        }),
-
-        vscode.commands.registerCommand('kimi-copilot.clearApiKey', async () => {
-            await configManager.deleteApiKey();
-            await configManager.clearServerModels();
-            provider.applyCachedServerModels();
-            provider.refreshModelPicker();
-            vscode.window.showInformationMessage('Stored Kimi API key cleared.');
-        }),
-
-        vscode.commands.registerCommand('kimi-copilot.selectModel', async () => {
-            const { MODELS } = await import('./models.js');
-            const current = configManager.getModel();
-
-            const items: vscode.QuickPickItem[] = MODELS.map((m) => ({
-                label: m.name,
-                description: m.id,
-                detail: m.detail,
-                picked: m.id === current,
-            }));
-
-            const selected = await vscode.window.showQuickPick(items, {
-                placeHolder: 'Select default Kimi model',
-                ignoreFocusOut: true,
-            });
-
-            if (selected) {
-                await configManager.config.update('model', selected.description, true);
-                provider.refreshModelPicker();
-                vscode.window.showInformationMessage(`Default Kimi model set to ${selected.label}`);
-            }
-        }),
-
-        vscode.commands.registerCommand('kimi-copilot.editModelConfig', async () => {
-            const { MODELS } = await import('./models.js');
-
-            const selected = await vscode.window.showQuickPick(
-                MODELS.map((m): vscode.QuickPickItem => ({
-                    label: m.name,
-                    description: m.id,
-                    detail: m.detail,
-                })),
-                { placeHolder: 'Select model to configure', ignoreFocusOut: true },
-            );
-
-            if (!selected) {
-                return;
-            }
-
-            const modelId = selected.description ?? '';
-            const currentConfig = configManager.getModelConfig(modelId);
-            const model = MODELS.find((m) => m.id === modelId);
-
-            const updated = await vscode.window.showInputBox({
-                prompt: `Edit JSON overrides for ${modelId}`,
-                value: JSON.stringify(currentConfig, null, 2),
-                ignoreFocusOut: true,
-                validateInput: (input) => {
-                    try {
-                        if (input.trim().length > 0) {
-                            JSON.parse(input);
-                        }
-                        return undefined;
-                    } catch (err) {
-                        return `Invalid JSON: ${err instanceof Error ? err.message : String(err)}`;
-                    }
-                },
-            });
-
-            if (updated === undefined) {
-                return;
-            }
-
-            const parsed = updated.trim().length > 0 ? JSON.parse(updated) : {};
-            const configs = configManager.config.get<Record<string, object>>('modelConfigs', {});
-            configs[modelId] = parsed;
-
-            await configManager.config.update('modelConfigs', configs, true);
-            provider.refreshModelPicker();
-            vscode.window.showInformationMessage(
-                `Updated configuration for ${model?.name ?? modelId}.`,
-            );
-        }),
-
-        vscode.commands.registerCommand('kimi-copilot.testConnection', async () => {
-            const apiKey = await configManager.getApiKey();
-            if (!apiKey) {
-                vscode.window.showErrorMessage('Kimi API key is not set. Run "Kimi Copilot: Set API Key".');
-                return;
-            }
-
-            try {
-                await provider.testConnection(configManager.getModel());
-                vscode.window.showInformationMessage('Kimi connection OK.');
-            } catch (err) {
-                vscode.window.showErrorMessage(`Kimi connection failed: ${err instanceof Error ? err.message : String(err)}`);
-            }
-        }),
-
-        vscode.commands.registerCommand('kimi-copilot.showUsagePopup', async () => {
-            await showUsageQuickPick(context, usageTracker);
-        }),
-
-        vscode.commands.registerCommand('kimi-copilot.showUsageStats', () => {
-            showUsageDetailsPanel(
-                context,
-                usageTracker,
-                () => vscode.commands.executeCommand('kimi-copilot.refreshQuota'),
-                () => vscode.commands.executeCommand('kimi-copilot.openKimiConsole'),
-            );
-        }),
-
-        vscode.commands.registerCommand('kimi-copilot.refreshQuota', async () => {
-            const apiKey = await configManager.getApiKey();
-            if (!apiKey) {
-                vscode.window.showErrorMessage('Kimi API key is not set. Run "Kimi Copilot: Set API Key".');
-                return;
-            }
-            const result = await usageClient.fetchUsage(apiKey);
-            if (result.kind === 'ok') {
-                usageTracker.setQuota(result.usage, null);
-                vscode.window.showInformationMessage('Kimi Copilot quota refreshed.');
-            } else {
-                usageTracker.setQuota(null, result.message);
-                vscode.window.showErrorMessage(result.message);
-            }
-        }),
-
-        vscode.commands.registerCommand('kimi-copilot.openKimiConsole', () => {
-            void vscode.env.openExternal(vscode.Uri.parse('https://platform.kimi.ai/console'));
-        }),
-
-        vscode.commands.registerCommand('kimi-copilot.resetUsageStats', async () => {
-            const answer = await vscode.window.showWarningMessage(
-                'Reset local Kimi Copilot usage statistics?',
-                { modal: true },
-                'Reset',
-            );
-            if (answer === 'Reset') {
-                usageTracker.reset();
-                vscode.window.showInformationMessage('Kimi Copilot usage statistics reset.');
-            }
-        }),
-
-        vscode.commands.registerCommand('kimi-copilot.openSettings', () => {
-            vscode.commands.executeCommand('workbench.action.openSettings', 'kimiCopilot');
-        }),
-    );
 }
 
 export async function deactivate(): Promise<void> {

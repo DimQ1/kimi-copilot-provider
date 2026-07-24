@@ -262,38 +262,40 @@ function buildReasoningEffortSchemaProperty(
 // successfully fetches GET /models with the user's API key, the returned
 // per-subscription parameters (context window, capabilities, effort
 // levels) are layered on top of it here, so every consumer of the helper
-// functions below sees the server-resolved values.
+// The dynamic effective-model list lives in ModelRegistry (dependency-injected
+// via activate()). These module-level helpers are kept for backward compatibility
+// with test files. They operate on the static MODELS table and the local
+// effectiveModels state below, with no import from model-registry.ts
+// (avoiding a circular dependency).
 
-let effectiveModels: ModelDefinition[] = MODELS;
+// Local mutable state, used only by the legacy helpers below.
+// NOT the source of truth at runtime — the injected ModelRegistry is.
+let effectiveModels: ModelDefinition[] = [...MODELS];
 
-/**
- * Replaces the effective registry with the server catalog merged over the
- * hard-coded fallback. Pass `undefined` to restore the hard-coded table.
- */
+/** @deprecated Use ModelRegistry instance instead. */
+export function getModelCapabilities(modelId: string): ModelCapabilities | undefined {
+	return effectiveModels.find((m) => m.id === modelId)?.capabilities;
+}
+/** @deprecated Use ModelRegistry instance instead. */
+export function getModelDefaults(modelId: string): ModelDefaults | undefined {
+	return effectiveModels.find((m) => m.id === modelId)?.defaults;
+}
+/** @deprecated Use ModelRegistry instance instead. */
+export function getMaxOutputTokens(modelId: string): number {
+	return effectiveModels.find((m) => m.id === modelId)?.maxOutputTokens ?? 32768;
+}
+/** @deprecated Use ModelRegistry instance instead. */
+export function findModelById(modelId: string): ModelDefinition | undefined {
+	return effectiveModels.find((m) => m.id === modelId);
+}
+/** @deprecated Use ModelRegistry instance instead. */
+export function getEffectiveModels(): readonly ModelDefinition[] {
+	return effectiveModels;
+}
+/** @deprecated Use ModelRegistry instance instead. */
 export function applyServerModelCatalog(serverModels: readonly KimiServerModelInfo[] | undefined): void {
 	effectiveModels =
 		serverModels && serverModels.length > 0
 			? applyServerModels(MODELS, serverModels)
-			: MODELS;
-}
-
-/** The effective registry: hard-coded MODELS plus any server overrides. */
-export function getEffectiveModels(): readonly ModelDefinition[] {
-	return effectiveModels;
-}
-
-export function getModelCapabilities(modelId: string): ModelCapabilities | undefined {
-	return effectiveModels.find((m) => m.id === modelId)?.capabilities;
-}
-
-export function getModelDefaults(modelId: string): ModelDefaults | undefined {
-	return effectiveModels.find((m) => m.id === modelId)?.defaults;
-}
-
-export function getMaxOutputTokens(modelId: string): number {
-	return effectiveModels.find((m) => m.id === modelId)?.maxOutputTokens ?? 32768;
-}
-
-export function findModelById(modelId: string): ModelDefinition | undefined {
-	return effectiveModels.find((m) => m.id === modelId);
+			: [...MODELS];
 }

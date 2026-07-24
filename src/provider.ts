@@ -1,10 +1,14 @@
 import * as vscode from 'vscode';
+import { KimiApiClient } from './api-client';
 import { ConfigurationManager } from './config';
 import { SessionContextTracker, formatBytes } from './context-tracker';
 import { MODELS, toChatInfo, getModelCapabilities, getMaxOutputTokens, getModelDefaults, findModelById, applyServerModelCatalog, getEffectiveModels } from './models';
 import { fetchKimiModels } from './models-client';
+import { KimiRequestBuilder } from './request-builder';
+import { getRequestPolicy, detectRequestPolicy } from './request-policy';
 import { transliterateMessages } from './transliterate';
 import { UsageTracker, hasUsage } from './usage';
+import { ModelRegistry } from './model-registry';
 import type { KimiContentPart, KimiMessage, KimiTool, KimiToolCall, KimiRequest, KimiStreamChunk, ModelDefaults, ModelConfigOverride } from './types';
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -39,6 +43,7 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
     constructor(
         private readonly configManager: ConfigurationManager,
         private readonly usageTracker: UsageTracker,
+        private readonly modelRegistry: ModelRegistry,
     ) {
         this.outputChannel = vscode.window.createOutputChannel('Kimi Copilot', { log: true });
 
@@ -58,7 +63,7 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
 
     /** Applies the cached server catalog (survives restarts) to the registry. */
     applyCachedServerModels(): void {
-        applyServerModelCatalog(this.configManager.getServerModels());
+        this.modelRegistry.applyServerCatalog(this.configManager.getServerModels());
     }
 
     /**
@@ -81,7 +86,7 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
             );
             return;
         }
-        applyServerModelCatalog(result.models);
+        this.modelRegistry.applyServerCatalog(result.models);
         await this.configManager.setServerModels([...result.models]);
         this.outputChannel.info(
             `Model catalog refreshed from server (${result.models.length} models): ` +
@@ -108,7 +113,7 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
         // Always return models — the `silent` flag means "don't prompt for credentials",
         // not "don't report models". The official sample ignores it entirely.
         const hasApiKey = !!(await this.configManager.getApiKey());
-        return getEffectiveModels().map((model) => toChatInfo(model, hasApiKey, this.configManager.getModelConfig(model.id)));
+        return this.modelRegistry.getAll().map((model) => toChatInfo(model, hasApiKey, this.configManager.getModelConfig(model.id)));
     }
 
     // ── Chat response ──────────────────────────────────────────────
@@ -163,81 +168,54 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
             );
         }
 
-        const endpoint = this.configManager.getEndpoint();
         const modelName = this.configManager.getApiModelId(modelInfo.id);
         const modelConfig = this.configManager.getModelConfig(modelInfo.id);
-        const modelDefaults = getModelDefaults(modelInfo.id);
-        const modelDefinition = findModelById(modelInfo.id);
-        const requestPolicy = modelName === 'kimi-k3'
-            ? 'k3'
-            : modelDefinition?.requestPolicy ?? modelDefaults?.requestPolicy ?? 'k2';
+        const modelDefaults = this.modelRegistry.getDefaults(modelInfo.id);
+        const modelDefinition = this.modelRegistry.findById(modelInfo.id);
+        const requestPolicy = detectRequestPolicy(
+            modelName,
+            modelDefinition?.requestPolicy ?? modelDefaults?.requestPolicy,
+        );
 
-        // Effective parameters: model config > global setting > hard-coded model default.
-        const temperature =
-            modelConfig.temperature ??
-            this.configManager.getTemperature() ??
-            modelDefaults?.temperature ??
-            1.0;
-        const topP =
-            modelConfig.topP ?? this.configManager.getTopP() ?? modelDefaults?.topP ?? 0.95;
-        const presencePenalty =
-            modelConfig.presencePenalty ??
-            this.configManager.getPresencePenalty(modelInfo.id) ??
-            0.0;
-        const frequencyPenalty =
-            modelConfig.frequencyPenalty ??
-            this.configManager.getFrequencyPenalty(modelInfo.id) ??
-            0.0;
+        // ── Resolve thinking (with supports_thinking_type guard) ────
         let thinking =
             modelConfig.thinking ??
             this.configManager.getThinking(modelInfo.id) ??
             modelDefaults?.thinking;
-        // When the server declares supports_thinking_type: "only" (all current
-        // Kimi Code models), the API rejects thinking.type: "disabled" — drop a
-        // stale user override instead of failing the request.
         if (thinking?.type === 'disabled' && modelDefinition?.supportsThinkingType === 'only') {
             this.outputChannel.warn(
                 `Model ${modelInfo.id} does not support disabling thinking (supports_thinking_type: "only"); ignoring the override.`,
             );
             thinking = { type: 'enabled' };
         }
+
         const reasoningEffort = resolveReasoningEffortFromOptions(options, modelDefaults, modelConfig);
 
         const maxTokensSetting = this.configManager.getMaxTokens(modelInfo.id);
-        const maxOutputTokens = modelConfig.maxOutputTokens ?? getMaxOutputTokens(modelInfo.id);
+        const maxOutputTokens = modelConfig.maxOutputTokens ?? this.modelRegistry.getMaxOutputTokens(modelInfo.id);
         const maxTokens = maxTokensSetting > 0
             ? Math.min(maxTokensSetting, 1048576)
             : maxOutputTokens;
 
         const enableStreaming = extras?.testMode ? false : this.configManager.getEnableStreaming();
-        const timeout = this.configManager.getTimeout();
         const transliterate = this.configManager.getTransliterate(modelInfo.id);
         let systemPrompt = this.configManager.getSystemPrompt(modelInfo.id);
         if (transliterate) {
-            // Transliteration is enabled, so the reply must always be in
-            // proper Russian (Cyrillic) — never mirrored transliteration.
-            // A custom instruction can be set without a reload via
-            // kimiCopilot.transliterateSystemPrompt (per-model or global).
             const replyInstruction =
                 this.configManager.getTransliterateSystemPrompt(modelInfo.id) ??
                 TRANSLITERATE_REPLY_INSTRUCTION;
             systemPrompt = `${systemPrompt}\n\n${replyInstruction}`;
         }
 
-        const capabilities = getModelCapabilities(modelInfo.id);
+        const capabilities = this.modelRegistry.getCapabilities(modelInfo.id);
         const toolCallingEnabled = modelConfig.toolCalling ?? capabilities?.toolCalling ?? false;
 
-        // Convert messages to API format and prepend system prompt
+        // ── Convert messages ────────────────────────────────────────
         const allMessages = convertMessages(messages);
         if (!allMessages.some((m) => m.role === 'system')) {
             allMessages.unshift({ role: 'system', content: systemPrompt });
         }
 
-        // Optional context optimizer: transliterate Cyrillic → Latin. This
-        // roughly halves the request body for Cyrillic-heavy chats (5.3 →
-        // 2.7 bytes/token measured) and delays hitting the 2 MiB body cap.
-        // The estimator below runs AFTER transliteration, so its byte count
-        // reflects what is actually sent.
         if (transliterate) {
             const changed = transliterateMessages(allMessages);
             if (changed > 0) {
@@ -245,9 +223,7 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
             }
         }
 
-        // Estimate and guard against context limits. The server-resolved
-        // context window (per subscription) is the source of truth; the
-        // per-request API cap is enforced separately inside tracker.check().
+        // ── Context estimation ─────────────────────────────────────
         const tracker = new SessionContextTracker({
             maxInputTokens: modelConfig.maxInputTokens ?? modelInfo.maxInputTokens,
             singleRequestLimit: modelDefinition?.singleRequestLimit,
@@ -265,7 +241,6 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
             tracker.check(allMessages);
         } catch (err) {
             this.usageTracker.setContextStats(estimate);
-            // Fallback: compact the conversation so the user can resend.
             this.triggerAutoCompact('local', true);
             throw err;
         }
@@ -274,30 +249,36 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
                 'The context is almost full. Consider starting a new chat session or running "/compact" soon.',
             );
         }
-
         this.usageTracker.setContextStats(estimate);
 
-        const request = buildKimiRequest({
-            model: modelName,
-            messages: allMessages,
-            stream: enableStreaming,
-            includeUsage: enableStreaming,
-            requestPolicy,
-            maxTokens: extras?.testMode ? 1 : maxTokens,
-            temperature,
-            topP,
-            presencePenalty,
-            frequencyPenalty,
-            thinking,
-            reasoningEffort,
-        });
-
-        // Convert tools if the model supports tool calling
+        // ── Build request via Builder ───────────────────────────────
         const tools = convertTools(toolCallingEnabled, options.tools);
-        if (tools && tools.length > 0) {
-            request.tools = tools;
-            request.tool_choice = toolCallingEnabled ? 'auto' : 'none';
-        }
+        const requestPolicyStrategy = getRequestPolicy(requestPolicy);
+
+        const builder = new KimiRequestBuilder(modelInfo.id, modelName)
+            .withMessages(allMessages)
+            .withStreaming(enableStreaming, enableStreaming)
+            .withMaxTokens(extras?.testMode ? 1 : maxTokens)
+            .withModelConfig(modelConfig)
+            .withModelDefaults(modelDefaults)
+            .withGlobalSettings(this.configManager)
+            .withThinking(thinking)
+            .withReasoningEffort(reasoningEffort)
+            .withRequestPolicy(requestPolicyStrategy.label as 'k2' | 'k3')
+            .withToolCalling(toolCallingEnabled, tools)
+            .withSystemPrompt(systemPrompt)
+            .withTransliterate(transliterate);
+
+        const request = builder.build();
+
+        // ── Send via Facade ─────────────────────────────────────────
+        const endpoint = this.configManager.getEndpoint();
+        const apiClient = new KimiApiClient(apiKey, endpoint, {
+            timeoutMs: this.configManager.getTimeout(),
+            maxRetries: this.configManager.getMaxRetries(),
+            retryBaseDelayMs: this.configManager.getRetryBaseDelayMs(),
+            retryMaxDelayMs: this.configManager.getRetryMaxDelayMs(),
+        });
 
         this.outputChannel.info(
             `→ ${allMessages.length} messages + ${tools?.length ?? 0} tools → ${endpoint} (model: ${modelName})`,
@@ -305,37 +286,19 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
 
         const startTime = Date.now();
         try {
-            const response = await this.fetchWithRetry(
-                endpoint,
-                {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        Authorization: `Bearer ${apiKey}`,
-                        Accept: enableStreaming ? 'text/event-stream' : 'application/json',
-                    },
-                    body: JSON.stringify(request),
-                },
-                timeout,
-                token,
-            );
+            const response = await apiClient.chat(request, token);
 
             if (!response.ok) {
                 const errText = await response.text().catch(() => 'unknown');
-                // A context-length rejection may mean the subscription tier
-                // changed since the last catalog fetch (e.g. downgrade from
-                // Allegretto+ to Moderato). Refresh /models in the background
-                // so the next request uses the server-resolved limits.
-                if (this.isContextLengthError(response.status, errText)) {
+                if (apiClient.isContextLengthError(response.status, errText)) {
                     this.outputChannel.warn(
                         'Server rejected the request for context length; refreshing model catalog in the background.',
                     );
                     void this.refreshModelsFromServer();
-                    // Fallback: compact the conversation and ask the user to
-                    // resend — the rejected request was dropped by the server.
                     this.triggerAutoCompact('api', true);
                 }
-                throw this.toLanguageModelError(response.status, errText);
+                const mappedError = apiClient.toLanguageModelError(response.status, errText);
+                throw mappedError ?? new vscode.LanguageModelError(`Kimi API error ${response.status}: ${errText.slice(0, 300)}`);
             }
 
             if (enableStreaming) {
@@ -351,7 +314,6 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
                 throw err;
             }
             const message = err instanceof Error ? err.message : String(err);
-            // Improve network-related diagnostics
             if (message.includes('fetch failed') || message.includes('ENOTFOUND') || message.includes('ECONNREFUSED')) {
                 throw new vscode.LanguageModelError(
                     `Unable to reach Kimi API at ${endpoint}. Check your network connection and endpoint configuration.`,
@@ -390,151 +352,9 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
         this.disposables.length = 0;
     }
 
-    // ── Fetch with timeout, retry and cancellation ─────────────────
-
-    /**
-     * Fetches with retries on retryable conditions:
-     * - HTTP 429 (rate limit) — honors the `Retry-After` header when present;
-     * - HTTP 500/502/503 (server errors);
-     * - network failures (fetch rejects) — the server never saw the request.
-     *
-     * Non-retryable statuses (400, 401, 403, …) are returned to the caller
-     * immediately so it can map them to a LanguageModelError. The response
-     * body of a retried attempt is always drained to free the connection.
-     */
-    private async fetchWithRetry(
-        url: string,
-        init: RequestInit,
-        timeoutMs: number,
-        token: vscode.CancellationToken,
-    ): Promise<Response> {
-        const maxAttempts = this.configManager.getMaxRetries() + 1;
-        let lastError: unknown;
-
-        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-            // Network-level failure (DNS, connection reset, timeout, abort).
-            try {
-                const response = await this.fetchWithTimeout(url, init, timeoutMs, token);
-                if (response.ok || !this.isRetryableStatus(response.status)) {
-                    return response;
-                }
-                // Retryable HTTP status. Read the body ONCE — Response.text()
-                // consumes the stream, and the caller re-reads it for the error
-                // message on the final attempt.
-                const retryAfterMs = this.parseRetryAfterMs(response.headers.get('retry-after'));
-                const bodyText = await response.text().catch(() => '');
-                if (attempt >= maxAttempts) {
-                    // Final attempt: hand the caller a fresh Response with the
-                    // same status/headers and the buffered body, so its
-                    // response.text() in the error path still works.
-                    return new Response(bodyText, {
-                        status: response.status,
-                        statusText: response.statusText,
-                        headers: response.headers,
-                    });
-                }
-                const delayMs = this.computeRetryDelayMs(attempt, retryAfterMs);
-                this.notifyRetry(attempt, maxAttempts, delayMs, `HTTP ${response.status}`, retryAfterMs !== undefined);
-                await this.sleep(delayMs, token);
-                continue;
-            } catch (err) {
-                lastError = err;
-                if (token.isCancellationRequested || attempt >= maxAttempts) {
-                    throw err;
-                }
-                const delayMs = this.computeRetryDelayMs(attempt, undefined);
-                this.notifyRetry(attempt, maxAttempts, delayMs, 'network error', false);
-                await this.sleep(delayMs, token);
-            }
-        }
-        throw lastError;
-    }
-
-    /** 429 and 5xx are worth retrying; everything else is a hard failure. */
-    private isRetryableStatus(status: number): boolean {
-        return status === 429 || status === 500 || status === 502 || status === 503;
-    }
-
-    /**
-     * Parses the `Retry-After` header. Supports both delta-seconds and an
-     * HTTP-date. Returns undefined when absent or unparsable.
-     */
-    private parseRetryAfterMs(value: string | null): number | undefined {
-        return parseRetryAfterHeader(value);
-    }
-
-    /**
-     * Computes the wait before the next attempt: server `Retry-After` wins;
-     * otherwise exponential backoff (base × 2^(attempt-1)) with ±25% jitter,
-     * capped at the configured maximum.
-     */
-    private computeRetryDelayMs(attempt: number, retryAfterMs: number | undefined): number {
-        return computeBackoffDelayMs({
-            attempt,
-            retryAfterMs,
-            baseDelayMs: this.configManager.getRetryBaseDelayMs(),
-            maxDelayMs: this.configManager.getRetryMaxDelayMs(),
-        });
-    }
-
-    /** Logs the retry and shows a non-intrusive status notification. */
-    private notifyRetry(
-        attempt: number,
-        maxAttempts: number,
-        delayMs: number,
-        reason: string,
-        serverHinted: boolean,
-    ): void {
-        const seconds = (delayMs / 1000).toFixed(1);
-        this.outputChannel.warn(
-            `Retry ${attempt}/${maxAttempts - 1} after ${reason}: waiting ${seconds}s${serverHinted ? ' (server Retry-After)' : ''}`,
-        );
-        if (attempt === 1) {
-            // Notify once per request — subsequent retries stay in the log.
-            void vscode.window.showInformationMessage(
-                `Kimi Copilot: rate limited by the API (${reason}). Retrying automatically — this may take a moment…`,
-            );
-        }
-    }
-
-    /** Sleep that resolves early when the request is cancelled. */
-    private sleep(ms: number, token: vscode.CancellationToken): Promise<void> {
-        return new Promise((resolve) => {
-            const timer = setTimeout(() => {
-                disposable.dispose();
-                resolve();
-            }, ms);
-            const disposable = token.onCancellationRequested(() => {
-                clearTimeout(timer);
-                resolve();
-            });
-        });
-    }
-
-    private async fetchWithTimeout(
-        url: string,
-        init: RequestInit,
-        timeoutMs: number,
-        token: vscode.CancellationToken,
-    ): Promise<Response> {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), timeoutMs);
-
-        const disposables: vscode.Disposable[] = [];
-        disposables.push(token.onCancellationRequested(() => controller.abort()));
-
-        try {
-            return await fetch(url, { ...init, signal: controller.signal });
-        } catch (err) {
-            if (err instanceof Error && err.name === 'AbortError') {
-                throw new Error(`Kimi API request timed out after ${timeoutMs}ms or was cancelled.`);
-            }
-            throw err;
-        } finally {
-            clearTimeout(timeout);
-            disposables.forEach((d) => d.dispose());
-        }
-    }
+    // ── HTTP is now delegated to KimiApiClient (Facade) ────────────
+    // fetchWithRetry, fetchWithTimeout, retry/backoff logic, and error
+    // mapping live in `src/api-client.ts` and `src/error-handlers.ts`.
 
     // ── Auto-compact fallback ────────────────────────────────────────
 
@@ -588,127 +408,25 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
         });
     }
 
-    // ── Error mapping ───────────────────────────────────────────────
-
-    /**
-     * Detects the Kimi Code API "request exceeded model token limit"
-     * rejection (HTTP 400 with a context-length marker in the body).
-     */
-    private isContextLengthError(status: number, body: string): boolean {
-        if (status !== 400) {
-            return false;
-        }
-        const text = body.toLowerCase();
-        return (
-            text.includes('context_length_exceeded') ||
-            text.includes('token limit') ||
-            text.includes('context length') ||
-            text.includes('maximum context')
-        );
-    }
-
-    private toLanguageModelError(status: number, body: string): vscode.LanguageModelError {
-        switch (status) {
-            case 401:
-                {
-                    const detail = body.trim().replace(/\s+/g, ' ').slice(0, 240);
-                    const credentialHint = 'For the default /coding/ endpoint, use a key created in the Kimi Code Console, not a Kimi Platform key.';
-                    return new vscode.LanguageModelError(
-                        `Invalid Kimi API key (401). ${credentialHint} Run "Kimi Copilot: Set API Key" to update.${detail ? ` Server response: ${detail}` : ''}`,
-                    );
-                }
-            case 403:
-                return new vscode.LanguageModelError(
-                    'Access denied by Kimi API (403).',
-                );
-            case 429:
-                return new vscode.LanguageModelError(
-                    'Kimi API rate limit exceeded (429). Retry later.',
-                );
-            case 400:
-                if (this.isContextLengthError(status, body)) {
-                    return new vscode.LanguageModelError(
-                        'The Kimi Code API rejected this request because it exceeds the per-request token limit, regardless of your subscription context window. Start a new chat session, run "/compact", or remove files from the context.',
-                    );
-                }
-                return new vscode.LanguageModelError(
-                    `Kimi API error ${status}: ${body.slice(0, 300)}`,
-                );
-            case 500:
-            case 502:
-            case 503:
-                return new vscode.LanguageModelError(
-                    'Kimi API server error. Retry later.',
-                );
-            default:
-                return new vscode.LanguageModelError(
-                    `Kimi API error ${status}: ${body.slice(0, 300)}`,
-                );
-        }
-    }
+    // ── Error mapping is now delegated to ErrorHandler chain ───────
+    // (src/error-handlers.ts). The chain is consumed through
+    // KimiApiClient.toLanguageModelError() and
+    // KimiApiClient.isContextLengthError().
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Re-exports for backward compatibility — keep provider.test.ts working
+// ═══════════════════════════════════════════════════════════════════════
+
+export { parseRetryAfterMs, parseRetryAfterMs as parseRetryAfterHeader, computeBackoffDelayMs } from './api-client';
+export { buildKimiRequest } from './request-policy';
 
 // ═══════════════════════════════════════════════════════════════════════
 // Helpers — message conversion
 // ═══════════════════════════════════════════════════════════════════════
 
-/**
- * Parses the `Retry-After` response header (RFC 9110 §10.2.3): either
- * delta-seconds or an HTTP-date. Returns milliseconds, or undefined when the
- * header is absent/unparsable. Pure — exported for unit tests.
- */
-export function parseRetryAfterHeader(value: string | null | undefined): number | undefined {
-    if (!value) {
-        return undefined;
-    }
-    const trimmed = value.trim();
-    // Delta-seconds: a non-negative integer per RFC 9110 §10.2.3. A bare
-    // signed number is NOT valid and must not fall through to Date.parse
-    // (V8 happily parses '-3' as a timestamp in the past).
-    if (/^\d+$/.test(trimmed)) {
-        return Number(trimmed) * 1000;
-    }
-    if (/^[+-]?\d*\.?\d+$/.test(trimmed)) {
-        return undefined;
-    }
-    const date = Date.parse(trimmed);
-    if (!Number.isNaN(date)) {
-        return Math.max(0, date - Date.now());
-    }
-    return undefined;
-}
-
-export interface BackoffOptions {
-    /** 1-based attempt number (the attempt that just failed). */
-    attempt: number;
-    /** Server-provided Retry-After in ms, when present — wins over backoff. */
-    retryAfterMs?: number | undefined;
-    /** Base delay for the first retry. */
-    baseDelayMs: number;
-    /** Cap for the computed backoff delay. */
-    maxDelayMs: number;
-    /** Jitter source, injectable for tests. Defaults to Math.random. */
-    random?: () => number;
-}
-
-/**
- * Computes the wait before the next retry. Server `Retry-After` wins (capped
- * at 4× maxDelayMs so a hostile header cannot park the caller forever);
- * otherwise exponential backoff (base × 2^(attempt-1)) with ±25% jitter,
- * capped at maxDelayMs. Pure — exported for unit tests.
- */
-export function computeBackoffDelayMs(options: BackoffOptions): number {
-    if (options.retryAfterMs !== undefined) {
-        return Math.min(options.retryAfterMs, options.maxDelayMs * 4);
-    }
-    const exponential = Math.min(
-        options.baseDelayMs * 2 ** (options.attempt - 1),
-        options.maxDelayMs,
-    );
-    const random = options.random ?? Math.random;
-    const jitter = exponential * (0.75 + random() * 0.5);
-    return Math.round(Math.min(jitter, options.maxDelayMs));
-}
+// parseRetryAfterHeader, computeBackoffDelayMs, buildKimiRequest now
+// re-exported from './api-client' and './request-policy' above.
 
 function roleToString(role: vscode.LanguageModelChatMessageRole): string {
     switch (role) {
@@ -891,46 +609,8 @@ export function resolveReasoningEffortFromOptions(
     );
 }
 
-export function buildKimiRequest(options: {
-    model: string;
-    messages: KimiMessage[];
-    stream: boolean;
-    includeUsage?: boolean;
-    requestPolicy: 'k2' | 'k3';
-    maxTokens: number;
-    temperature: number;
-    topP: number;
-    presencePenalty: number;
-    frequencyPenalty: number;
-    thinking?: { type: 'enabled' | 'disabled' };
-    reasoningEffort?: 'low' | 'high' | 'max';
-}): KimiRequest {
-    const request: KimiRequest = {
-        model: options.model,
-        messages: options.messages,
-        stream: options.stream,
-    };
-
-    if (options.stream && options.includeUsage) {
-        request.stream_options = { include_usage: true };
-    }
-
-    if (options.requestPolicy === 'k3') {
-        request.max_completion_tokens = options.maxTokens;
-        request.reasoning_effort = options.reasoningEffort ?? 'max';
-    } else {
-        request.temperature = options.temperature;
-        request.top_p = options.topP;
-        request.max_tokens = options.maxTokens;
-        request.presence_penalty = options.presencePenalty;
-        request.frequency_penalty = options.frequencyPenalty;
-        if (options.thinking) {
-            request.thinking = options.thinking;
-        }
-    }
-
-    return request;
-}
+// buildKimiRequest is now re-exported from './request-policy' above.
+// convertTools and streaming/completion helpers follow.
 
 export function convertTools(
     toolCallingCapability: boolean | undefined,
