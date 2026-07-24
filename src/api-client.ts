@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import type { KimiRequest, KimiStreamChunk, KimiUsage } from './types';
+import type { KimiRequest } from './types';
 import { createErrorChain, isContextLengthError } from './error-handlers';
 
 // ═══════════════════════════════════════════════════════════════════════

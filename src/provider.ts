@@ -2,14 +2,14 @@ import * as vscode from 'vscode';
 import { KimiApiClient } from './api-client';
 import { ConfigurationManager } from './config';
 import { SessionContextTracker, formatBytes } from './context-tracker';
-import { MODELS, toChatInfo, getModelCapabilities, getMaxOutputTokens, getModelDefaults, findModelById, applyServerModelCatalog, getEffectiveModels } from './models';
+import { MODELS, toChatInfo } from './models';
 import { fetchKimiModels } from './models-client';
 import { KimiRequestBuilder } from './request-builder';
 import { getRequestPolicy, detectRequestPolicy } from './request-policy';
 import { transliterateMessages } from './transliterate';
 import { UsageTracker, hasUsage } from './usage';
 import { ModelRegistry } from './model-registry';
-import type { KimiContentPart, KimiMessage, KimiTool, KimiToolCall, KimiRequest, KimiStreamChunk, ModelDefaults, ModelConfigOverride } from './types';
+import type { KimiContentPart, KimiMessage, KimiTool, KimiToolCall, KimiStreamChunk, ModelDefaults, ModelConfigOverride } from './types';
 
 // ═══════════════════════════════════════════════════════════════════════
 // Constants
