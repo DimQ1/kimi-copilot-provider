@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.7] - 2026-07-24
+
+### Fixed
+- **Circular import crash**: `models.ts` → `model-registry.ts` → `models.ts` caused extension to fail loading after GoF refactoring. Broke the cycle by moving deprecated helpers to local logic.
+- Unused ESLint imports (`KimiStreamChunk`, `KimiUsage` in `api-client.ts`) causing CI failures.
+
+### Changed
+- Extracted commands, HTTP client, error handlers, request builder, and request policy into dedicated files (GoF patterns: Facade, Builder, Strategy, Command, Chain of Responsibility).
+
 ## [1.8.5] - 2026-07-21
 
 ### Removed
