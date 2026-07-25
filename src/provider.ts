@@ -264,9 +264,21 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
             ? 1
             : Math.max(1, Math.min(maxTokens, remainingContext));
         if (clampedMaxTokens < maxTokens && !extras?.testMode) {
+            const reductionPct = Math.round((1 - clampedMaxTokens / maxTokens) * 100);
             this.outputChannel.info(
-                `Completion budget clamped: ${maxTokens.toLocaleString('en-US')} → ${clampedMaxTokens.toLocaleString('en-US')} (context window ${estimate.limit.toLocaleString('en-US')} − estimated ${estimate.tokens.toLocaleString('en-US')} input = ${remainingContext.toLocaleString('en-US')} remaining)`,
+                `Completion budget clamped: ${maxTokens.toLocaleString('en-US')} → ${clampedMaxTokens.toLocaleString('en-US')} (context window ${estimate.limit.toLocaleString('en-US')} − estimated ${estimate.tokens.toLocaleString('en-US')} input = ${remainingContext.toLocaleString('en-US')} remaining, −${reductionPct}%)`,
             );
+
+            // If clamping cut more than 50% of the requested output budget,
+            // the context is too full for a meaningful response — trigger
+            // compaction so the NEXT request has room. The current request
+            // still goes through with the clamped budget.
+            if (reductionPct > 50) {
+                this.outputChannel.warn(
+                    `Completion budget cut by ${reductionPct}% — context is nearly full; triggering auto-compact for the next request.`,
+                );
+                this.triggerAutoCompact('local', true);
+            }
         }
 
         // ── Normalize tool call IDs for Kimi API (max 64 chars) ──────
