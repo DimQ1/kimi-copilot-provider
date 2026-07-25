@@ -204,26 +204,19 @@ export class KimiApiClient {
 
 	private translateError(err: unknown): Error {
 		if (err instanceof OpenAI.APIError) {
-			const body = (err as { message?: string }).message ?? '';
+			const apiMsg = parseApiMessage(err);
 
 			// Check for context-length overflow first
-			if (err.status === 400 && (
-				body.includes('context_length_exceeded') ||
-				body.includes('token limit') ||
-				body.includes('context length') ||
-				body.includes('maximum context')
-			)) {
+			if (err.status === 400 && isOpenAIContextOverflow(err)) {
 				return new vscode.LanguageModelError(
-					'The Kimi Code API rejected this request because it exceeds the per-request token limit.',
+					`Kimi API context overflow: ${apiMsg}. Start a new chat, run "/compact", or remove files from the context. (HTTP 400)`,
 				);
 			}
 
 			const mapped = this.toLanguageModelError(err);
 			if (mapped) return mapped;
 
-			return new vscode.LanguageModelError(
-				`Kimi API error ${err.status}: ${body.slice(0, 300)}`,
-			);
+			return new vscode.LanguageModelError(`Kimi API: ${apiMsg} (HTTP ${err.status}).`);
 		}
 
 		if (err instanceof Error) {
@@ -293,6 +286,28 @@ function extractRetryAfterFromError(err: unknown): number | null {
 	const apiErr = err as { response?: { headers?: Headers } } | null;
 	const value = apiErr?.response?.headers?.get('retry-after');
 	return parseRetryAfterMs(value);
+}
+
+/**
+ * Parse the error message from an OpenAI APIError, trying to extract
+ * the Kimi-structured JSON error body: { error: { message, type } }.
+ * Falls back to the SDK error message when parsing fails.
+ */
+function parseApiMessage(err: unknown): string {
+	if (err instanceof OpenAI.APIError) {
+		try {
+			const body = (err as { message?: string }).message ?? '';
+			const parsed = JSON.parse(body) as { error?: { message?: string; type?: string } };
+			if (parsed.error?.message) {
+				const type = parsed.error.type ? ` [${parsed.error.type}]` : '';
+				return `${parsed.error.message.trim()}${type}`;
+			}
+		} catch {
+			// not JSON — use the SDK message directly
+		}
+		return (err as { message?: string }).message ?? String(err);
+	}
+	return String(err);
 }
 
 /**

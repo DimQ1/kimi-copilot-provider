@@ -7,7 +7,9 @@ import * as vscode from 'vscode';
 // body). If yes, it returns a LanguageModelError; if not, it delegates to
 // the next handler in the chain.
 //
-// The chain is assembled once and reused for every request.
+// The Kimi API returns structured errors:
+//   { "error": { "message": "...", "type": "..." } }
+// parseApiErrorBody() extracts the message so every handler can surface it.
 // ═══════════════════════════════════════════════════════════════════════
 
 export interface ErrorHandler {
@@ -15,6 +17,34 @@ export interface ErrorHandler {
 	handle(status: number, body: string): vscode.LanguageModelError | null;
 	/** Links the next handler in the chain, returns it for fluent chaining. */
 	setNext(handler: ErrorHandler): ErrorHandler;
+}
+
+// ── API error body parser ──────────────────────────────────────────
+
+interface KimiApiError {
+	error?: {
+		message?: string;
+		type?: string;
+	};
+}
+
+/**
+ * Tries to parse the JSON error body from the Kimi API and extract a
+ * human-readable message. Falls back to the raw body (truncated) when
+ * parsing fails.
+ */
+function parseApiErrorBody(body: string): string {
+	try {
+		const parsed: KimiApiError = JSON.parse(body);
+		if (parsed.error?.message) {
+			const msg = parsed.error.message.trim();
+			const type = parsed.error.type ? ` [${parsed.error.type}]` : '';
+			return `${msg}${type}`;
+		}
+	} catch {
+		// not JSON — use raw body
+	}
+	return body.trim().replace(/\s+/g, ' ').slice(0, 300) || 'no details';
 }
 
 // ── Base class ─────────────────────────────────────────────────────
@@ -40,20 +70,28 @@ abstract class BaseErrorHandler implements ErrorHandler {
 
 class AuthErrorHandler extends BaseErrorHandler {
 	protected tryHandle(status: number, body: string): vscode.LanguageModelError | null {
+		const apiMsg = parseApiErrorBody(body);
 		if (status === 401) {
-			const detail = body.trim().replace(/\s+/g, ' ').slice(0, 240);
 			return new vscode.LanguageModelError(
-				`Invalid Kimi API key (401). For the default /coding/ endpoint, use a key created in the Kimi Code Console, not a Kimi Platform key. Run "Kimi Copilot: Set API Key" to update.${detail ? ` Server response: ${detail}` : ''}`,
+				`Kimi API: ${apiMsg} (HTTP 401). Run "Kimi Copilot: Set API Key" to update your key.`,
 			);
 		}
 		if (status === 403) {
-			// Quota exhausted (access_terminated_error) — distinct from access denied.
-			if (body.includes('access_terminated_error')) {
-				return new vscode.LanguageModelError(
-					'Kimi API usage limit reached for this billing cycle. Upgrade your plan or wait for the next cycle. Visit: https://www.kimi.com/code/#pricing',
-				);
-			}
-			return new vscode.LanguageModelError('Access denied by Kimi API (403).');
+			return new vscode.LanguageModelError(`Kimi API: ${apiMsg} (HTTP 403).`);
+		}
+		return null;
+	}
+}
+
+// ── Payment required (402) ─────────────────────────────────────────
+
+class PaymentRequiredHandler extends BaseErrorHandler {
+	protected tryHandle(status: number, body: string): vscode.LanguageModelError | null {
+		if (status === 402) {
+			const apiMsg = parseApiErrorBody(body);
+			return new vscode.LanguageModelError(
+				`Kimi API: ${apiMsg} (HTTP 402). Visit: https://www.kimi.com/code/#pricing`,
+			);
 		}
 		return null;
 	}
@@ -62,9 +100,10 @@ class AuthErrorHandler extends BaseErrorHandler {
 // ── Rate limit (429) ───────────────────────────────────────────────
 
 class RateLimitHandler extends BaseErrorHandler {
-	protected tryHandle(status: number): vscode.LanguageModelError | null {
+	protected tryHandle(status: number, body: string): vscode.LanguageModelError | null {
 		if (status === 429) {
-			return new vscode.LanguageModelError('Kimi API rate limit exceeded (429). Retry later.');
+			const apiMsg = parseApiErrorBody(body);
+			return new vscode.LanguageModelError(`Kimi API: ${apiMsg} (HTTP 429).`);
 		}
 		return null;
 	}
@@ -74,9 +113,7 @@ class RateLimitHandler extends BaseErrorHandler {
 
 class ContextLengthHandler extends BaseErrorHandler {
 	protected tryHandle(status: number, body: string): vscode.LanguageModelError | null {
-		if (status !== 400) {
-			return null;
-		}
+		if (status !== 400) return null;
 		const text = body.toLowerCase();
 		if (
 			text.includes('context_length_exceeded') ||
@@ -84,8 +121,9 @@ class ContextLengthHandler extends BaseErrorHandler {
 			text.includes('context length') ||
 			text.includes('maximum context')
 		) {
+			const apiMsg = parseApiErrorBody(body);
 			return new vscode.LanguageModelError(
-				'The Kimi Code API rejected this request because it exceeds the per-request token limit, regardless of your subscription context window. Start a new chat session, run "/compact", or remove files from the context.',
+				`Kimi API context overflow: ${apiMsg}. Start a new chat, run "/compact", or remove files from the context.`,
 			);
 		}
 		return null;
@@ -97,7 +135,8 @@ class ContextLengthHandler extends BaseErrorHandler {
 class BadRequestHandler extends BaseErrorHandler {
 	protected tryHandle(status: number, body: string): vscode.LanguageModelError | null {
 		if (status === 400) {
-			return new vscode.LanguageModelError(`Kimi API error ${status}: ${body.slice(0, 300)}`);
+			const apiMsg = parseApiErrorBody(body);
+			return new vscode.LanguageModelError(`Kimi API: ${apiMsg} (HTTP 400).`);
 		}
 		return null;
 	}
@@ -106,9 +145,10 @@ class BadRequestHandler extends BaseErrorHandler {
 // ── Server errors (5xx) ────────────────────────────────────────────
 
 class ServerErrorHandler extends BaseErrorHandler {
-	protected tryHandle(status: number): vscode.LanguageModelError | null {
+	protected tryHandle(status: number, body: string): vscode.LanguageModelError | null {
 		if (status >= 500 && status < 600) {
-			return new vscode.LanguageModelError('Kimi API server error. Retry later.');
+			const apiMsg = parseApiErrorBody(body);
+			return new vscode.LanguageModelError(`Kimi API: ${apiMsg} (HTTP ${status}).`);
 		}
 		return null;
 	}
@@ -118,7 +158,8 @@ class ServerErrorHandler extends BaseErrorHandler {
 
 class FallbackHandler extends BaseErrorHandler {
 	protected tryHandle(status: number, body: string): vscode.LanguageModelError | null {
-		return new vscode.LanguageModelError(`Kimi API error ${status}: ${body.slice(0, 300)}`);
+		const apiMsg = parseApiErrorBody(body);
+		return new vscode.LanguageModelError(`Kimi API: ${apiMsg} (HTTP ${status}).`);
 	}
 }
 
@@ -130,16 +171,23 @@ class FallbackHandler extends BaseErrorHandler {
  * (e.g. ContextLengthHandler must precede BadRequestHandler for 400).
  */
 export function createErrorChain(): ErrorHandler {
-	const chain = new AuthErrorHandler();
-	chain
-		.setNext(new RateLimitHandler())
-		.setNext(new ContextLengthHandler())
-		.setNext(new BadRequestHandler())
-		.setNext(new ServerErrorHandler())
-		.setNext(new FallbackHandler());
-	return chain;
-}
+	const auth = new AuthErrorHandler();
+	const payment = new PaymentRequiredHandler();
+	const rateLimit = new RateLimitHandler();
+	const contextLength = new ContextLengthHandler();
+	const badRequest = new BadRequestHandler();
+	const serverError = new ServerErrorHandler();
+	const fallback = new FallbackHandler();
 
+	auth.setNext(payment);
+	payment.setNext(rateLimit);
+	rateLimit.setNext(contextLength);
+	contextLength.setNext(badRequest);
+	badRequest.setNext(serverError);
+	serverError.setNext(fallback);
+
+	return auth;
+}
 // ── Predicate helpers (re-exported for the provider's auto-compact logic) ──
 
 /** Detects the Kimi Code API "request exceeded model token limit" rejection. */
