@@ -244,14 +244,6 @@ export class KimiRequestBuilder {
 		if (this._toolCallingEnabled && this._tools && this._tools.length > 0) {
 			request.tools = this._tools;
 			request.tool_choice = 'auto';
-
-			// Message-level tools: inject tools into the first system message
-			// so the model sees them at the right point in the conversation.
-			// Mirrors kimi-code's messages[].tools progressive disclosure.
-			const systemMsg = request.messages.find((m) => m.role === 'system');
-			if (systemMsg && !systemMsg.tools) {
-				systemMsg.tools = this._tools;
-			}
 		}
 
 		return request;

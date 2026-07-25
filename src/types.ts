@@ -21,8 +21,6 @@ export interface KimiMessage {
 	content: string | KimiContentPart[];
 	tool_call_id?: string;
 	tool_calls?: KimiToolCall[];
-	/** Per-message tool declarations (messages[].tools in Kimi API). */
-	tools?: KimiTool[];
 }
 
 export type KimiContentPart = KimiTextContentPart | KimiImageContentPart;
