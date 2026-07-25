@@ -47,6 +47,12 @@ class AuthErrorHandler extends BaseErrorHandler {
 			);
 		}
 		if (status === 403) {
+			// Quota exhausted (access_terminated_error) — distinct from access denied.
+			if (body.includes('access_terminated_error')) {
+				return new vscode.LanguageModelError(
+					'Kimi API usage limit reached for this billing cycle. Upgrade your plan or wait for the next cycle. Visit: https://www.kimi.com/code/#pricing',
+				);
+			}
 			return new vscode.LanguageModelError('Access denied by Kimi API (403).');
 		}
 		return null;
