@@ -195,6 +195,9 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
 
         const reasoningEffort = resolveReasoningEffortFromOptions(options, modelDefaults, modelConfig);
 
+        // ── Resolve thinking keep (echo previous reasoning back to API) ──
+        const thinkingKeep = modelConfig.thinkingKeep;
+
         const maxTokensSetting = this.configManager.getMaxTokens(modelInfo.id);
         const maxOutputTokens = modelConfig.maxOutputTokens ?? this.modelRegistry.getMaxOutputTokens(modelInfo.id);
         let maxTokens = maxTokensSetting > 0
@@ -297,6 +300,7 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
             .withGlobalSettings(this.configManager)
             .withThinking(thinking)
             .withReasoningEffort(reasoningEffort)
+            .withThinkingKeep(thinkingKeep)
             .withRequestPolicy(requestPolicyStrategy.label as 'k2' | 'k3')
             .withToolCalling(toolCallingEnabled, tools)
             .withSystemPrompt(systemPrompt)
@@ -311,6 +315,12 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
             maxRetries: this.configManager.getMaxRetries(),
             retryBaseDelayMs: this.configManager.getRetryBaseDelayMs(),
             retryMaxDelayMs: this.configManager.getRetryMaxDelayMs(),
+            // Retry once on context overflow: compact first, then the retry
+            // has room to succeed. Mirrors kimi-code's retryable context.overflow.
+            onContextOverflow: () => {
+                this.outputChannel.warn('Context overflow from API — compacting before retry.');
+                this.triggerAutoCompact('api', false);
+            },
         });
 
         this.outputChannel.info(

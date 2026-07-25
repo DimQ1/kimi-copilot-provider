@@ -18,6 +18,13 @@ export interface ApiClientOptions {
 	maxRetries: number;
 	retryBaseDelayMs: number;
 	retryMaxDelayMs: number;
+	/**
+	 * Called when the API returns a context-length overflow error (HTTP 400
+	 * with context_length_exceeded marker). The callback runs BEFORE the
+	 * retry — hosts should compact the conversation here so the retry has
+	 * room. When omitted, context overflow is non-retryable.
+	 */
+	onContextOverflow?: () => void | Promise<void>;
 }
 
 const DEFAULT_OPTIONS: ApiClientOptions = {
@@ -137,7 +144,19 @@ export class KimiApiClient {
 			} catch (err) {
 				lastError = err;
 
-				// Non-retryable: context length, auth, bad request etc.
+				// Context-length overflow: trigger compaction callback, then retry once.
+				// The callback (auto-compact) frees context space so the retry can succeed.
+				if (isOpenAIContextOverflow(err) && this.options.onContextOverflow) {
+					if (attempt < maxAttempts && !token.isCancellationRequested) {
+						await this.options.onContextOverflow();
+						// Give the compaction a moment to flush before retrying.
+						const delayMs = this.computeRetryDelay(attempt, undefined);
+						await this.sleep(delayMs, token);
+						continue;
+					}
+				}
+
+				// Non-retryable: auth, bad request etc.
 				if (!this.isRetryableError(err)) {
 					throw this.translateError(err);
 				}
@@ -274,6 +293,22 @@ function extractRetryAfterFromError(err: unknown): number | null {
 	const apiErr = err as { response?: { headers?: Headers } } | null;
 	const value = apiErr?.response?.headers?.get('retry-after');
 	return parseRetryAfterMs(value);
+}
+
+/**
+ * Check whether an error is a context-length overflow from the API
+ * (HTTP 400 with context_length_exceeded / token limit markers).
+ */
+function isOpenAIContextOverflow(err: unknown): boolean {
+	if (!(err instanceof OpenAI.APIError)) return false;
+	if (err.status !== 400) return false;
+	const body = (err as { message?: string }).message ?? '';
+	return (
+		body.includes('context_length_exceeded') ||
+		body.includes('token limit') ||
+		body.includes('context length') ||
+		body.includes('maximum context')
+	);
 }
 
 /**
