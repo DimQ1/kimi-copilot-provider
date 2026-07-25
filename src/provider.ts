@@ -197,7 +197,7 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
 
         const maxTokensSetting = this.configManager.getMaxTokens(modelInfo.id);
         const maxOutputTokens = modelConfig.maxOutputTokens ?? this.modelRegistry.getMaxOutputTokens(modelInfo.id);
-        const maxTokens = maxTokensSetting > 0
+        let maxTokens = maxTokensSetting > 0
             ? Math.min(maxTokensSetting, 1048576)
             : maxOutputTokens;
 
@@ -255,6 +255,20 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
         }
         this.usageTracker.setContextStats(estimate);
 
+        // ── Clamp max completion tokens against remaining context ─────
+        // Mirrors kimi-code's completion budget: cap = min(requested, window - used).
+        // Prevents the API from rejecting the request because requested output
+        // tokens + estimated input tokens exceed the model's context window.
+        const remainingContext = estimate.limit - estimate.tokens;
+        const clampedMaxTokens = extras?.testMode
+            ? 1
+            : Math.max(1, Math.min(maxTokens, remainingContext));
+        if (clampedMaxTokens < maxTokens && !extras?.testMode) {
+            this.outputChannel.info(
+                `Completion budget clamped: ${maxTokens.toLocaleString('en-US')} → ${clampedMaxTokens.toLocaleString('en-US')} (context window ${estimate.limit.toLocaleString('en-US')} − estimated ${estimate.tokens.toLocaleString('en-US')} input = ${remainingContext.toLocaleString('en-US')} remaining)`,
+            );
+        }
+
         // ── Normalize tool call IDs for Kimi API (max 64 chars) ──────
         const normalizedMessages = normalizeToolCallIds(allMessages);
 
@@ -265,7 +279,7 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
         const builder = new KimiRequestBuilder(modelInfo.id, modelName)
             .withMessages(normalizedMessages)
             .withStreaming(enableStreaming, enableStreaming)
-            .withMaxTokens(extras?.testMode ? 1 : maxTokens)
+            .withMaxTokens(clampedMaxTokens)
             .withModelConfig(modelConfig)
             .withModelDefaults(modelDefaults)
             .withGlobalSettings(this.configManager)
@@ -303,14 +317,19 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
                 this.outputChannel.info(`trace-id: ${chatResult.traceId}`);
             }
 
+            const networkTime = Date.now() - startTime;
+
             if (chatResult.isStream) {
-                await streamOpenAIResponse(
+                const timing = await streamOpenAIResponse(
                     chatResult.data as AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
                     progress,
                     token,
                     this.outputChannel,
                     this.usageTracker,
                     reasoningDialect,
+                );
+                this.outputChannel.info(
+                    `← stream done: TTFT ${timing.ttftMs}ms, decode ${timing.streamDurationMs}ms, ${timing.chunkCount} chunks, network ${networkTime}ms, total ${Date.now() - startTime}ms`,
                 );
             } else {
                 await completeOpenAIResponse(
@@ -320,9 +339,8 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
                     this.usageTracker,
                     reasoningDialect,
                 );
+                this.outputChannel.info(`← completed in ${Date.now() - startTime}ms (non-streaming)`);
             }
-
-            this.outputChannel.info(`← completed in ${Date.now() - startTime}ms`);
         } catch (err) {
             this.outputChannel.error('Request failed', err);
             if (err instanceof vscode.LanguageModelError) {
@@ -778,6 +796,15 @@ async function completeOpenAIResponse(
 // Streaming response (OpenAI SDK) with dialect-aware reasoning detection
 // ═══════════════════════════════════════════════════════════════════════
 
+interface StreamTiming {
+    /** Wall-clock ms from function entry to first chunk (TTFT). */
+    ttftMs: number;
+    /** Wall-clock ms from first chunk to stream end. */
+    streamDurationMs: number;
+    /** Total number of chunks received. */
+    chunkCount: number;
+}
+
 async function streamOpenAIResponse(
     stream: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
     progress: vscode.Progress<vscode.LanguageModelResponsePart>,
@@ -785,7 +812,11 @@ async function streamOpenAIResponse(
     outputChannel: vscode.LogOutputChannel,
     usageTracker: UsageTracker,
     reasoningDialect: ReasoningKeyDialect,
-): Promise<void> {
+): Promise<StreamTiming> {
+    const streamStart = Date.now();
+    let firstChunkAt: number | undefined;
+    let chunkCount = 0;
+
     const pendingToolCalls = new Map<
         number,
         { id: string; name: string; args: string }
@@ -834,7 +865,12 @@ async function streamOpenAIResponse(
 
     try {
         for await (const chunk of stream) {
-            if (token.isCancellationRequested) return;
+            if (token.isCancellationRequested) break;
+
+            chunkCount++;
+            if (firstChunkAt === undefined) {
+                firstChunkAt = Date.now();
+            }
 
             // Extract usage from chunk (Kimi may place it in choices[0].usage too)
             const rawChunk = chunk as unknown as Record<string, unknown>;
@@ -899,6 +935,13 @@ async function streamOpenAIResponse(
     // Stream ended — flush any remaining state
     if (fallbackReasoningBuffer) flushFallbackReasoning();
     emitPendingToolCalls();
+
+    const streamEnd = Date.now();
+    return {
+        ttftMs: firstChunkAt !== undefined ? firstChunkAt - streamStart : streamEnd - streamStart,
+        streamDurationMs: firstChunkAt !== undefined ? streamEnd - firstChunkAt : 0,
+        chunkCount,
+    };
 }
 
 /**
