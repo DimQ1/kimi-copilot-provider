@@ -325,8 +325,9 @@
     }
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
+    "vscode:prepublish": "npm run compile && npm run vendor:openai",
     "compile": "tsc -p ./",
+    "vendor:openai": "node -e \"const{cpSync,mkdirSync}=require('fs');const{join}=require('path');const s='node_modules/openai';const d='out/node_modules/openai';mkdirSync(join(d,'..'),{recursive:true});cpSync(s,d,{recursive:true})\"",
     "watch": "tsc -watch -p ./",
     "lint": "eslint src",
     "format": "prettier --write src",
