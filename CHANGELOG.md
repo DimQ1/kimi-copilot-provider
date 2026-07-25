@@ -5,14 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.8.7] - 2026-07-24
-
-### Fixed
-- **Circular import crash**: `models.ts` → `model-registry.ts` → `models.ts` caused extension to fail loading after GoF refactoring. Broke the cycle by moving deprecated helpers to local logic.
-- Unused ESLint imports (`KimiStreamChunk`, `KimiUsage` in `api-client.ts`) causing CI failures.
+## [Unreleased]
 
 ### Changed
-- Extracted commands, HTTP client, error handlers, request builder, and request policy into dedicated files (GoF patterns: Facade, Builder, Strategy, Command, Chain of Responsibility).
+- **OpenAI SDK**: Replaced raw `fetch()` + manual SSE parsing with the official `openai` SDK (v6.x, same as kimi-code). The SDK's `withResponse()` gives access to `x-trace-id` from response headers before the stream body — trace IDs are now logged for every request.
+- **Reasoning dialect auto-detection**: Ported `ReasoningKeyDialect` from kimi-code's kosong layer. The provider now scans `reasoning_content`, `reasoning`, and `reasoning_details` (in priority order) and remembers which key the server used, echoing thinking back under the same key. No more silent reasoning loss when the API switches vLLM dialects.
+- **JSON Schema normalization for tools**: Ported `normalizeKimiToolSchema` + `derefJsonSchema` from kimi-code. Tool input schemas with `$ref` pointers are now dereferenced and missing `type` fields are inferred before sending — preventing Kimi API rejections for MCP tools with complex (but valid) JSON Schema.
+- **Tool call ID sanitization**: Tool call IDs are now normalized to at most 64 characters and safe characters (`a-zA-Z0-9_-`) before sending, matching Kimi API constraints.
+
+### Fixed
+- `parseRetryAfterMs` return type changed from `number | undefined` to `number | null` for consistency with the OpenAI SDK error path.
 
 ## [1.8.5] - 2026-07-21
 

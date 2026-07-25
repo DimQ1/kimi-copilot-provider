@@ -1,19 +1,16 @@
 import * as vscode from 'vscode';
+import OpenAI from 'openai';
 import type { KimiRequest } from './types';
 import { createErrorChain, isContextLengthError } from './error-handlers';
 
 // ═══════════════════════════════════════════════════════════════════════
-// KimiApiClient — GoF Facade pattern
+// KimiApiClient — GoF Facade pattern (OpenAI SDK–backed)
 //
-// Encapsulates all HTTP communication with the Kimi Code API behind a
-// single, focused interface. The provider delegates to this facade for
-// chat requests, retry logic, timeout handling, and error mapping — it no
-// longer touches raw fetch(), AbortController, or retry/backoff directly.
-//
-// This also centralises the two concerns that were previously scattered
-// across the provider: (1) translating HTTP statuses into
-// LanguageModelError, and (2) detecting context-length rejections for
-// the auto-compact fallback.
+// Uses the official `openai` SDK (same as kimi-code's kosong layer) for
+// SSE streaming, error classification, and trace-id extraction via
+// `withResponse()`. The SDK resolves `withResponse()` as soon as response
+// headers arrive — before the stream body — so `x-trace-id` is available
+// even for streams the caller later cancels mid-flight.
 // ═══════════════════════════════════════════════════════════════════════
 
 export interface ApiClientOptions {
@@ -30,121 +27,204 @@ const DEFAULT_OPTIONS: ApiClientOptions = {
 	retryMaxDelayMs: 30000,
 };
 
+/**
+ * The result of a chat request — either a stream or a non-stream completion.
+ * Carries the x-trace-id extracted from response headers for diagnostics.
+ */
+export interface ChatResult {
+	/** The OpenAI SDK stream or completion. */
+	data: OpenAI.Chat.Completions.ChatCompletion | AsyncIterable<OpenAI.Chat.ChatCompletionChunk>;
+	/** Provider trace identifier from `x-trace-id` header, or null. */
+	traceId: string | null;
+	/** Whether the response is a stream. */
+	isStream: boolean;
+}
+
 export class KimiApiClient {
 	private readonly errorChain = createErrorChain();
+	private readonly client: OpenAI;
 
 	constructor(
 		private readonly apiKey: string,
 		private readonly endpoint: string,
 		private readonly options: ApiClientOptions = DEFAULT_OPTIONS,
-	) {}
+	) {
+		// Strip /chat/completions suffix to get the base URL for the SDK.
+		const baseURL = endpoint.endsWith('/chat/completions')
+			? endpoint.slice(0, -'/chat/completions'.length)
+			: endpoint;
+		this.client = new OpenAI({ apiKey, baseURL });
+	}
 
 	// ── Public API ──────────────────────────────────────────────────
 
 	/**
-	 * Sends a chat request to the Kimi Code API with automatic retries.
-	 * Returns the raw Response (OK or not) — the caller streams the body.
+	 * Sends a chat request via the OpenAI SDK with automatic retries.
+	 * Returns a {@link ChatResult} with the data and trace-id.
+	 *
+	 * Uses `withResponse()` so `x-trace-id` is available as soon as
+	 * response headers arrive — before the stream body is drained.
 	 */
 	async chat(
 		request: KimiRequest,
 		token: vscode.CancellationToken,
-	): Promise<Response> {
-		const enableStreaming = request.stream === true;
-		return this.fetchWithRetry(
-			{
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json',
-					Authorization: `Bearer ${this.apiKey}`,
-					Accept: enableStreaming ? 'text/event-stream' : 'application/json',
-				},
-				body: JSON.stringify(request),
-			},
-			token,
-		);
+	): Promise<ChatResult> {
+		return this.chatWithRetry(request, token);
 	}
 
 	/**
-	 * Maps an HTTP error response to a LanguageModelError.
-	 * Returns null when the response is OK.
+	 * Maps an error to a LanguageModelError.
+	 * Accepts either a raw Error (from SDK) or status+body (legacy path).
 	 */
-	toLanguageModelError(status: number, body: string): vscode.LanguageModelError | null {
-		return this.errorChain.handle(status, body);
+	toLanguageModelError(
+		statusOrError: number | unknown,
+		body?: string,
+	): vscode.LanguageModelError | null {
+		if (typeof statusOrError === 'number') {
+			return this.errorChain.handle(statusOrError, body ?? '');
+		}
+		// Extract status from OpenAI SDK error
+		const err = statusOrError as Record<string, unknown> | null | undefined;
+		const status = typeof err?.status === 'number' ? err.status : 0;
+		const message = typeof err?.message === 'string' ? err.message : '';
+		if (status > 0) {
+			return this.errorChain.handle(status, message);
+		}
+		return null;
 	}
 
-	/** Checks whether the given status/body indicates a context-length rejection. */
-	isContextLengthError(status: number, body: string): boolean {
-		return isContextLengthError(status, body);
+	/** Checks whether the given error indicates a context-length rejection. */
+	isContextLengthError(statusOrError: number | unknown, body?: string): boolean {
+		if (typeof statusOrError === 'number') {
+			return isContextLengthError(statusOrError, body ?? '');
+		}
+		const err = statusOrError as Record<string, unknown> | null | undefined;
+		const status = typeof err?.status === 'number' ? err.status : 0;
+		const message = typeof err?.message === 'string' ? err.message : '';
+		return isContextLengthError(status, message);
 	}
 
-	// ── Internal: fetch with retry ──────────────────────────────────
+	// ── Internal: chat with retry ───────────────────────────────────
 
-	private async fetchWithRetry(
-		init: RequestInit,
+	private async chatWithRetry(
+		request: KimiRequest,
 		token: vscode.CancellationToken,
-	): Promise<Response> {
+	): Promise<ChatResult> {
 		const maxAttempts = this.options.maxRetries + 1;
 		let lastError: unknown;
 
 		for (let attempt = 1; attempt <= maxAttempts; attempt++) {
 			try {
-				const response = await this.fetchWithTimeout(init, token);
-				if (response.ok || !this.isRetryableStatus(response.status)) {
-					return response;
-				}
+				const signal = this.createTimeoutSignal(token);
 
-				const retryAfterMs = parseRetryAfterMs(response.headers.get('retry-after'));
-				const bodyText = await response.text().catch(() => '');
+				// withResponse() resolves when headers arrive, before the stream body.
+				const { data, response } = await this.client.chat.completions
+					.create(
+						request as unknown as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming,
+						{ signal },
+					)
+					.withResponse();
 
-				if (attempt >= maxAttempts) {
-					return new Response(bodyText, {
-						status: response.status,
-						statusText: response.statusText,
-						headers: response.headers,
-					});
-				}
+				const traceId = parseTraceId(response.headers);
 
-				const delayMs = this.computeRetryDelay(attempt, retryAfterMs);
-				await this.sleep(delayMs, token);
+				return {
+					data: data as unknown as
+						| OpenAI.Chat.Completions.ChatCompletion
+						| AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
+					traceId,
+					isStream: request.stream === true,
+				};
 			} catch (err) {
 				lastError = err;
-				if (token.isCancellationRequested || attempt >= maxAttempts) {
-					throw err;
+
+				// Non-retryable: context length, auth, bad request etc.
+				if (!this.isRetryableError(err)) {
+					throw this.translateError(err);
 				}
-				const delayMs = this.computeRetryDelay(attempt, undefined);
+
+				if (token.isCancellationRequested || attempt >= maxAttempts) {
+					throw this.translateError(err);
+				}
+
+				const retryAfterMs = extractRetryAfterFromError(err);
+				const delayMs = this.computeRetryDelay(attempt, retryAfterMs ?? undefined);
 				await this.sleep(delayMs, token);
 			}
 		}
-		throw lastError;
+		throw this.translateError(lastError);
 	}
 
-	private async fetchWithTimeout(
-		init: RequestInit,
-		token: vscode.CancellationToken,
-	): Promise<Response> {
+	private createTimeoutSignal(token: vscode.CancellationToken): AbortSignal {
 		const controller = new AbortController();
 		const timeout = setTimeout(() => controller.abort(), this.options.timeoutMs);
+		const disposable = token.onCancellationRequested(() => controller.abort());
 
-		const disposables: vscode.Disposable[] = [];
-		disposables.push(token.onCancellationRequested(() => controller.abort()));
-
-		try {
-			return await fetch(this.endpoint, { ...init, signal: controller.signal });
-		} catch (err) {
-			if (err instanceof Error && err.name === 'AbortError') {
-				throw new Error(
-					`Kimi API request timed out after ${this.options.timeoutMs}ms or was cancelled.`,
-				);
-			}
-			throw err;
-		} finally {
+		controller.signal.addEventListener('abort', () => {
 			clearTimeout(timeout);
-			disposables.forEach((d) => d.dispose());
-		}
+			disposable.dispose();
+		}, { once: true });
+
+		return controller.signal;
 	}
 
-	private isRetryableStatus(status: number): boolean {
-		return status === 429 || status === 500 || status === 502 || status === 503;
+	private isRetryableError(err: unknown): boolean {
+		if (err instanceof OpenAI.APIError) {
+			return err.status === 429 || err.status >= 500;
+		}
+		if (err instanceof Error) {
+			const msg = err.message.toLowerCase();
+			return (
+				msg.includes('fetch failed') ||
+				msg.includes('econnrefused') ||
+				msg.includes('enotfound') ||
+				msg.includes('timeout')
+			);
+		}
+		return false;
+	}
+
+	private translateError(err: unknown): Error {
+		if (err instanceof OpenAI.APIError) {
+			const body = (err as { message?: string }).message ?? '';
+
+			// Check for context-length overflow first
+			if (err.status === 400 && (
+				body.includes('context_length_exceeded') ||
+				body.includes('token limit') ||
+				body.includes('context length') ||
+				body.includes('maximum context')
+			)) {
+				return new vscode.LanguageModelError(
+					'The Kimi Code API rejected this request because it exceeds the per-request token limit.',
+				);
+			}
+
+			const mapped = this.toLanguageModelError(err);
+			if (mapped) return mapped;
+
+			return new vscode.LanguageModelError(
+				`Kimi API error ${err.status}: ${body.slice(0, 300)}`,
+			);
+		}
+
+		if (err instanceof Error) {
+			const msg = err.message;
+			if (msg.includes('fetch failed') || msg.includes('ENOTFOUND') || msg.includes('ECONNREFUSED')) {
+				return new vscode.LanguageModelError(
+					`Unable to reach Kimi API at ${this.endpoint}. Check your network connection.`,
+					{ cause: err },
+				);
+			}
+			if (msg.includes('aborted') || msg.includes('AbortError') || err.name === 'AbortError') {
+				return new vscode.LanguageModelError(
+					'Kimi API request was cancelled or timed out.',
+					{ cause: err },
+				);
+			}
+			return new vscode.LanguageModelError(msg, { cause: err });
+		}
+
+		return new vscode.LanguageModelError(String(err));
 	}
 
 	private computeRetryDelay(attempt: number, retryAfterMs: number | undefined): number {
@@ -174,29 +254,46 @@ export class KimiApiClient {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// Helpers — extracted from the old provider for backward compatibility.
-// Keep exported for provider.test.ts; the provider itself now delegates
-// to KimiApiClient.
+// Helpers
 // ═══════════════════════════════════════════════════════════════════════
 
 /**
- * Parses the `Retry-After` response header (RFC 9110 §10.2.3).
- * Exported for unit tests; the client uses this internally.
+ * Parse the `x-trace-id` header from response headers.
+ * Kimi/KFC returns a trace ID for request diagnostics.
  */
-export function parseRetryAfterMs(value: string | null | undefined): number | undefined {
-	if (!value) return undefined;
+function parseTraceId(headers: Headers | undefined): string | null {
+	if (!headers) return null;
+	const value = headers.get('x-trace-id');
+	return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+/**
+ * Extract Retry-After from an OpenAI error's response headers.
+ */
+function extractRetryAfterFromError(err: unknown): number | null {
+	const apiErr = err as { response?: { headers?: Headers } } | null;
+	const value = apiErr?.response?.headers?.get('retry-after');
+	return parseRetryAfterMs(value);
+}
+
+/**
+ * Parses the `Retry-After` response header (RFC 9110 §10.2.3).
+ * Exported for unit tests and backward compatibility.
+ */
+export function parseRetryAfterMs(value: string | null | undefined): number | null {
+	if (!value) return null;
 	const trimmed = value.trim();
 	if (/^\d+$/.test(trimmed)) {
 		return Number(trimmed) * 1000;
 	}
 	if (/^[+-]?\d*\.?\d+$/.test(trimmed)) {
-		return undefined;
+		return null;
 	}
 	const date = Date.parse(trimmed);
 	if (!Number.isNaN(date)) {
 		return Math.max(0, date - Date.now());
 	}
-	return undefined;
+	return null;
 }
 
 export interface BackoffOptions {
