@@ -297,23 +297,6 @@ function extractRetryAfterFromError(err: unknown): number | null {
 	return parseRetryAfterMs(value);
 }
 
-/**
- * Parse the error message from an OpenAI APIError, trying to extract
- * the Kimi-structured JSON error body: { error: { message, type } }.
- * Falls back to the SDK error message when parsing fails.
- */
-function parseApiMessage(err: unknown): string {
-	if (err instanceof OpenAI.APIError) {
-		const parsed = parseApiErrorJson(err);
-		if (parsed) {
-			const type = parsed.type ? ` [${parsed.type}]` : '';
-			return `${parsed.message}${type}`;
-		}
-		return (err as { message?: string }).message ?? String(err);
-	}
-	return String(err);
-}
-
 interface ParsedApiError { message: string; type?: string }
 
 /**

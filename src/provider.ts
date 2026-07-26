@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import OpenAI from 'openai';
-import { KimiApiClient, type ChatResult } from './api-client';
+import { KimiApiClient } from './api-client';
 import { ConfigurationManager } from './config';
 import { SessionContextTracker, formatBytes } from './context-tracker';
 import { MODELS, toChatInfo } from './models';
@@ -13,7 +13,7 @@ import { ModelRegistry } from './model-registry';
 import { ReasoningKeyDialect } from './reasoning-key';
 import { normalizeToolCallIds } from './tool-call-id';
 import { normalizeKimiToolSchema } from './kimi-schema';
-import type { KimiContentPart, KimiMessage, KimiTool, KimiToolCall, KimiStreamChunk, ModelDefaults, ModelConfigOverride } from './types';
+import type { KimiContentPart, KimiMessage, KimiTool, KimiToolCall, ModelDefaults, ModelConfigOverride } from './types';
 
 // ═══════════════════════════════════════════════════════════════════════
 // Constants
@@ -207,7 +207,7 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
 
         const maxTokensSetting = this.configManager.getMaxTokens(modelInfo.id);
         const maxOutputTokens = modelConfig.maxOutputTokens ?? this.modelRegistry.getMaxOutputTokens(modelInfo.id);
-        let maxTokens = maxTokensSetting > 0
+        const maxTokens = maxTokensSetting > 0
             ? Math.min(maxTokensSetting, 1048576)
             : maxOutputTokens;
 
