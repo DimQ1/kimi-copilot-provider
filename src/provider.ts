@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
-import { KimiApiClient } from './api-client';
+import OpenAI from 'openai';
+import { KimiApiClient, type ChatResult } from './api-client';
 import { ConfigurationManager } from './config';
 import { SessionContextTracker, formatBytes } from './context-tracker';
 import { MODELS, toChatInfo } from './models';
@@ -9,6 +10,9 @@ import { getRequestPolicy, detectRequestPolicy } from './request-policy';
 import { transliterateMessages } from './transliterate';
 import { UsageTracker, hasUsage } from './usage';
 import { ModelRegistry } from './model-registry';
+import { ReasoningKeyDialect } from './reasoning-key';
+import { normalizeToolCallIds } from './tool-call-id';
+import { normalizeKimiToolSchema } from './kimi-schema';
 import type { KimiContentPart, KimiMessage, KimiTool, KimiToolCall, KimiStreamChunk, ModelDefaults, ModelConfigOverride } from './types';
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -39,6 +43,13 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
     private readonly disposables: vscode.Disposable[] = [];
     /** Guards against repeatedly triggering compaction within one session. */
     private autoCompactTriggered = false;
+    /**
+     * Per-endpoint reasoning-field dialect: learns which wire key the server
+     * uses (reasoning_content / reasoning / reasoning_details) and echoes
+     * thinking back under the same key. Persistent across requests — mirrors
+     * kimi-code's shared ReasoningKeyDialect per provider instance.
+     */
+    private readonly reasoningDialect = new ReasoningKeyDialect();
 
     constructor(
         private readonly configManager: ConfigurationManager,
@@ -191,9 +202,12 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
 
         const reasoningEffort = resolveReasoningEffortFromOptions(options, modelDefaults, modelConfig);
 
+        // ── Resolve thinking keep (echo previous reasoning back to API) ──
+        const thinkingKeep = modelConfig.thinkingKeep;
+
         const maxTokensSetting = this.configManager.getMaxTokens(modelInfo.id);
         const maxOutputTokens = modelConfig.maxOutputTokens ?? this.modelRegistry.getMaxOutputTokens(modelInfo.id);
-        const maxTokens = maxTokensSetting > 0
+        let maxTokens = maxTokensSetting > 0
             ? Math.min(maxTokensSetting, 1048576)
             : maxOutputTokens;
 
@@ -251,19 +265,49 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
         }
         this.usageTracker.setContextStats(estimate);
 
+        // ── Clamp max completion tokens against remaining context ─────
+        // Mirrors kimi-code's completion budget: cap = min(requested, window - used).
+        // Prevents the API from rejecting the request because requested output
+        // tokens + estimated input tokens exceed the model's context window.
+        const remainingContext = estimate.limit - estimate.tokens;
+        const clampedMaxTokens = extras?.testMode
+            ? 1
+            : Math.max(1, Math.min(maxTokens, remainingContext));
+        if (clampedMaxTokens < maxTokens && !extras?.testMode) {
+            const reductionPct = Math.round((1 - clampedMaxTokens / maxTokens) * 100);
+            this.outputChannel.info(
+                `Completion budget clamped: ${maxTokens.toLocaleString('en-US')} → ${clampedMaxTokens.toLocaleString('en-US')} (context window ${estimate.limit.toLocaleString('en-US')} − estimated ${estimate.tokens.toLocaleString('en-US')} input = ${remainingContext.toLocaleString('en-US')} remaining, −${reductionPct}%)`,
+            );
+
+            // If clamping cut more than 50% of the requested output budget,
+            // the context is too full for a meaningful response — trigger
+            // compaction so the NEXT request has room. The current request
+            // still goes through with the clamped budget.
+            if (reductionPct > 50) {
+                this.outputChannel.warn(
+                    `Completion budget cut by ${reductionPct}% — context is nearly full; triggering auto-compact for the next request.`,
+                );
+                this.triggerAutoCompact('local', true);
+            }
+        }
+
+        // ── Normalize tool call IDs for Kimi API (max 64 chars) ──────
+        const normalizedMessages = normalizeToolCallIds(allMessages);
+
         // ── Build request via Builder ───────────────────────────────
         const tools = convertTools(toolCallingEnabled, options.tools);
         const requestPolicyStrategy = getRequestPolicy(requestPolicy);
 
         const builder = new KimiRequestBuilder(modelInfo.id, modelName)
-            .withMessages(allMessages)
+            .withMessages(normalizedMessages)
             .withStreaming(enableStreaming, enableStreaming)
-            .withMaxTokens(extras?.testMode ? 1 : maxTokens)
+            .withMaxTokens(clampedMaxTokens)
             .withModelConfig(modelConfig)
             .withModelDefaults(modelDefaults)
             .withGlobalSettings(this.configManager)
             .withThinking(thinking)
             .withReasoningEffort(reasoningEffort)
+            .withThinkingKeep(thinkingKeep)
             .withRequestPolicy(requestPolicyStrategy.label as 'k2' | 'k3')
             .withToolCalling(toolCallingEnabled, tools)
             .withSystemPrompt(systemPrompt)
@@ -278,36 +322,53 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
             maxRetries: this.configManager.getMaxRetries(),
             retryBaseDelayMs: this.configManager.getRetryBaseDelayMs(),
             retryMaxDelayMs: this.configManager.getRetryMaxDelayMs(),
+            // Retry once on context overflow: compact first, then the retry
+            // has room to succeed. Mirrors kimi-code's retryable context.overflow.
+            onContextOverflow: () => {
+                this.outputChannel.warn('Context overflow from API — compacting before retry.');
+                this.triggerAutoCompact('api', false);
+            },
         });
 
         this.outputChannel.info(
-            `→ ${allMessages.length} messages + ${tools?.length ?? 0} tools → ${endpoint} (model: ${modelName})`,
+            `→ ${normalizedMessages.length} messages + ${tools?.length ?? 0} tools → ${endpoint} (model: ${modelName})`,
         );
 
         const startTime = Date.now();
+
         try {
-            const response = await apiClient.chat(request, token);
+            const chatResult = await apiClient.chat(request, token);
 
-            if (!response.ok) {
-                const errText = await response.text().catch(() => 'unknown');
-                if (apiClient.isContextLengthError(response.status, errText)) {
-                    this.outputChannel.warn(
-                        'Server rejected the request for context length; refreshing model catalog in the background.',
-                    );
-                    void this.refreshModelsFromServer();
-                    this.triggerAutoCompact('api', true);
-                }
-                const mappedError = apiClient.toLanguageModelError(response.status, errText);
-                throw mappedError ?? new vscode.LanguageModelError(`Kimi API error ${response.status}: ${errText.slice(0, 300)}`);
+            // Log trace-id for request diagnostics (available from response headers
+            // before the stream body, via the OpenAI SDK's withResponse()).
+            if (chatResult.traceId) {
+                this.outputChannel.info(`trace-id: ${chatResult.traceId}`);
             }
 
-            if (enableStreaming) {
-                await streamSSEResponse(response, progress, token, this.outputChannel, this.usageTracker);
+            const networkTime = Date.now() - startTime;
+
+            if (chatResult.isStream) {
+                const timing = await streamOpenAIResponse(
+                    chatResult.data as AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
+                    progress,
+                    token,
+                    this.outputChannel,
+                    this.usageTracker,
+                    this.reasoningDialect,
+                );
+                this.outputChannel.info(
+                    `← stream done: TTFT ${timing.ttftMs}ms, decode ${timing.streamDurationMs}ms, ${timing.chunkCount} chunks, network ${networkTime}ms, total ${Date.now() - startTime}ms`,
+                );
             } else {
-                await completeResponse(response, progress, this.outputChannel, this.usageTracker);
+                await completeOpenAIResponse(
+                    chatResult.data as OpenAI.Chat.Completions.ChatCompletion,
+                    progress,
+                    this.outputChannel,
+                    this.usageTracker,
+                    this.reasoningDialect,
+                );
+                this.outputChannel.info(`← completed in ${Date.now() - startTime}ms (non-streaming)`);
             }
-
-            this.outputChannel.info(`← completed in ${Date.now() - startTime}ms`);
         } catch (err) {
             this.outputChannel.error('Request failed', err);
             if (err instanceof vscode.LanguageModelError) {
@@ -325,6 +386,14 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
                     'Kimi API request was cancelled or timed out.',
                     { cause: err },
                 );
+            }
+            // Check for context-length overflow from the API client's translated error
+            if (message.includes('per-request token limit') || message.includes('context_length_exceeded')) {
+                this.outputChannel.warn(
+                    'Server rejected the request for context length; refreshing model catalog in the background.',
+                );
+                void this.refreshModelsFromServer();
+                this.triggerAutoCompact('api', true);
             }
             throw new vscode.LanguageModelError(message, { cause: err });
         }
@@ -620,14 +689,21 @@ export function convertTools(
         return undefined;
     }
 
-    return tools.map((tool) => ({
-        type: 'function' as const,
-        function: {
-            name: tool.name,
-            description: tool.description,
-            parameters: tool.inputSchema as Record<string, unknown> | undefined,
-        },
-    }));
+    return tools.map((tool) => {
+        const rawParams = tool.inputSchema as Record<string, unknown> | undefined;
+        const parameters =
+            rawParams !== undefined && Object.keys(rawParams).length > 0
+                ? normalizeKimiToolSchema(rawParams)
+                : undefined;
+        return {
+            type: 'function' as const,
+            function: {
+                name: tool.name,
+                description: tool.description,
+                parameters,
+            },
+        };
+    });
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -685,52 +761,44 @@ export function tryReportThinkingPart(
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// Non-streaming response
+// Non-streaming response (OpenAI SDK)
 // ═══════════════════════════════════════════════════════════════════════
 
-async function completeResponse(
-    response: Response,
+async function completeOpenAIResponse(
+    completion: OpenAI.Chat.Completions.ChatCompletion,
     progress: vscode.Progress<vscode.LanguageModelResponsePart>,
     outputChannel: vscode.LogOutputChannel,
     usageTracker: UsageTracker,
+    reasoningDialect: ReasoningKeyDialect,
 ): Promise<void> {
-    const data = (await response.json()) as {
-        choices: Array<{
-            message?: {
-                role?: string;
-                content?: string | null;
-                reasoning_content?: string | null;
-                tool_calls?: KimiToolCall[];
-            };
-            finish_reason: string | null;
-        }>;
-        usage?: {
-            prompt_tokens?: number;
-            completion_tokens?: number;
-            total_tokens?: number;
-            cached_tokens?: number;
+    if (completion.usage) {
+        const usage = {
+            prompt_tokens: completion.usage.prompt_tokens ?? 0,
+            completion_tokens: completion.usage.completion_tokens ?? 0,
+            total_tokens: completion.usage.total_tokens ?? 0,
+            cached_tokens: (completion.usage.prompt_tokens_details as { cached_tokens?: number } | null | undefined)?.cached_tokens,
         };
-    };
-
-    if (hasUsage(data.usage)) {
-        usageTracker.recordUsage(data.usage);
-        reportCopilotContextUsage(progress, data.usage);
+        if (hasUsage(usage)) {
+            usageTracker.recordUsage(usage);
+            reportCopilotContextUsage(progress, usage);
+        }
     }
 
-    const message = data.choices[0]?.message;
+    const message = completion.choices[0]?.message;
     if (!message) {
         outputChannel.warn('Empty response from Kimi API');
         return;
     }
 
-    // Reasoning / thinking content (non-streaming responses may include it)
-    if (message.reasoning_content) {
-        outputChannel.debug(`Kimi reasoning content in non-streaming response (${message.reasoning_content.length} chars)`);
-        const reported = tryReportThinkingPart(progress, message.reasoning_content);
+    // Reasoning / thinking content — use dialect-aware detection across all known keys
+    const rawMsg = message as unknown as Record<string, unknown>;
+    const reasoningText = reasoningDialect.observe(rawMsg);
+    if (reasoningText) {
+        outputChannel.debug(`Reasoning in non-streaming response (${reasoningText.length} chars, key: ${reasoningDialect.outboundKey()})`);
+        const reported = tryReportThinkingPart(progress, reasoningText);
         if (!reported) {
-            // Fallback: prepend thinking as a formatted text block
-            outputChannel.debug('LanguageModelThinkingPart unavailable, using text fallback for reasoning content');
-            progress.report(new vscode.LanguageModelTextPart(formatThinkingAsText(message.reasoning_content)));
+            outputChannel.debug('LanguageModelThinkingPart unavailable, using text fallback for reasoning');
+            progress.report(new vscode.LanguageModelTextPart(formatThinkingAsText(reasoningText)));
         }
     }
 
@@ -740,6 +808,7 @@ async function completeResponse(
 
     if (message.tool_calls) {
         for (const call of message.tool_calls) {
+            if (call.type !== 'function') continue;
             progress.report(
                 new vscode.LanguageModelToolCallPart(
                     call.id,
@@ -752,38 +821,41 @@ async function completeResponse(
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// SSE streaming — OpenAI-compatible
+// Streaming response (OpenAI SDK) with dialect-aware reasoning detection
 // ═══════════════════════════════════════════════════════════════════════
 
-async function streamSSEResponse(
-    response: Response,
+interface StreamTiming {
+    /** Wall-clock ms from function entry to first chunk (TTFT). */
+    ttftMs: number;
+    /** Wall-clock ms from first chunk to stream end. */
+    streamDurationMs: number;
+    /** Total number of chunks received. */
+    chunkCount: number;
+}
+
+async function streamOpenAIResponse(
+    stream: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
     progress: vscode.Progress<vscode.LanguageModelResponsePart>,
     token: vscode.CancellationToken,
     outputChannel: vscode.LogOutputChannel,
     usageTracker: UsageTracker,
-): Promise<void> {
-    const reader = response.body?.getReader();
-    if (!reader) {
-        throw new Error('No response body from Kimi API');
-    }
+    reasoningDialect: ReasoningKeyDialect,
+): Promise<StreamTiming> {
+    const streamStart = Date.now();
+    let firstChunkAt: number | undefined;
+    let chunkCount = 0;
 
-    const decoder = new TextDecoder('utf-8');
-    let buffer = '';
     const pendingToolCalls = new Map<
         number,
         { id: string; name: string; args: string }
     >();
 
     // Fallback reasoning buffer — used when LanguageModelThinkingPart is unavailable.
-    // Reasoning typically arrives before text content. We buffer it and flush at the
-    // first text chunk (or at stream end) as a formatted markdown block.
     let fallbackReasoningBuffer: string | undefined;
-    let thinkingPartAvailable: boolean | undefined; // undefined = not yet determined
+    let thinkingPartAvailable: boolean | undefined;
 
     const emitPendingToolCalls = (): void => {
-        if (pendingToolCalls.size === 0) {
-            return;
-        }
+        if (pendingToolCalls.size === 0) return;
         for (const call of pendingToolCalls.values()) {
             if (call.id && call.name) {
                 progress.report(
@@ -798,7 +870,6 @@ async function streamSSEResponse(
         pendingToolCalls.clear();
     };
 
-    /** Flush accumulated fallback reasoning as a text part, if any. */
     const flushFallbackReasoning = (): void => {
         if (fallbackReasoningBuffer && fallbackReasoningBuffer.length > 0) {
             outputChannel.debug(`Flushing accumulated reasoning (${fallbackReasoningBuffer.length} chars) as text fallback`);
@@ -807,147 +878,141 @@ async function streamSSEResponse(
         }
     };
 
-    /** Attempt to report a reasoning delta as a native thinking part. Falls back to buffering on error. */
     const handleReasoningDelta = (text: string): void => {
         if (thinkingPartAvailable === undefined) {
-            // Probe once: try reporting natively. If it works, mark as available.
-            // LanguageModelThinkingPart is a proposed API accessible at runtime
-            // when GitHub.copilot-chat (which has it enabled) renders the response.
-            // We do NOT declare it in enabledApiProposals — see package.json.
             const success = tryReportThinkingPart(progress, text);
             thinkingPartAvailable = success;
-            if (success) {
-                return; // already reported via tryReportThinkingPart
-            }
+            if (success) return;
         }
         if (thinkingPartAvailable) {
-            // Proven available — report each subsequent delta natively
             tryReportThinkingPart(progress, text);
         } else {
-            // Fallback: buffer until we hit text content or stream end
             fallbackReasoningBuffer = (fallbackReasoningBuffer ?? '') + text;
         }
     };
 
     try {
-        while (true) {
-            if (token.isCancellationRequested) {
-                await reader.cancel();
-                return;
+        for await (const chunk of stream) {
+            if (token.isCancellationRequested) break;
+
+            chunkCount++;
+            if (firstChunkAt === undefined) {
+                firstChunkAt = Date.now();
             }
 
-            let readResult: ReadableStreamReadResult<Uint8Array>;
-            try {
-                readResult = await reader.read();
-            } catch (err) {
-                if (err instanceof Error && err.name === 'AbortError') {
-                    outputChannel.warn('SSE stream aborted');
-                    return;
-                }
-                throw err;
+            // Extract usage from chunk (Kimi may place it in choices[0].usage too)
+            const rawChunk = chunk as unknown as Record<string, unknown>;
+            const rawUsage = extractChunkUsage(rawChunk);
+            if (rawUsage && hasUsage(rawUsage)) {
+                usageTracker.recordUsage(rawUsage);
+                reportCopilotContextUsage(progress, rawUsage);
             }
 
-            const { done, value } = readResult;
-            if (done) {
-                // Stream ended — flush any remaining fallback reasoning before tool calls
-                if (fallbackReasoningBuffer) {
-                    flushFallbackReasoning();
+            const choice = chunk.choices[0];
+            if (!choice) continue;
+
+            const delta = choice.delta as Record<string, unknown>;
+
+            // Reasoning / thinking content — dialect-aware detection across all known keys
+            const reasoningText = reasoningDialect.observe(delta);
+            if (reasoningText) {
+                handleReasoningDelta(reasoningText);
+            }
+
+            // Text content
+            if (typeof delta['content'] === 'string' && (delta['content'] as string).length > 0) {
+                if (fallbackReasoningBuffer) flushFallbackReasoning();
+                if (thinkingPartAvailable === undefined) thinkingPartAvailable = false;
+                progress.report(new vscode.LanguageModelTextPart(delta['content'] as string));
+            }
+
+            // Tool calls
+            const toolCalls = delta['tool_calls'] as Array<{
+                index: number;
+                id?: string;
+                type?: string;
+                function?: { name?: string; arguments?: string };
+            }> | undefined;
+
+            if (toolCalls) {
+                for (const tc of toolCalls) {
+                    let existing = pendingToolCalls.get(tc.index);
+                    if (!existing) {
+                        existing = { id: '', name: '', args: '' };
+                        pendingToolCalls.set(tc.index, existing);
+                    }
+                    if (tc.id) existing.id = tc.id;
+                    if (tc.function?.name) existing.name += tc.function.name;
+                    if (tc.function?.arguments) existing.args += tc.function.arguments;
                 }
+            }
+
+            // Emit completed tool calls on finish
+            if (choice.finish_reason) {
+                if (fallbackReasoningBuffer) flushFallbackReasoning();
                 emitPendingToolCalls();
-                break;
-            }
-
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split('\n');
-            buffer = lines.pop() ?? '';
-
-            for (const line of lines) {
-                const trimmed = line.trim();
-                if (!trimmed.startsWith('data:')) {
-                    continue;
-                }
-
-                const payload = trimmed.slice(5).trim();
-                if (payload === '[DONE]') {
-                    if (fallbackReasoningBuffer) {
-                        flushFallbackReasoning();
-                    }
-                    emitPendingToolCalls();
-                    return;
-                }
-
-                try {
-                    const parsed = JSON.parse(payload) as KimiStreamChunk;
-                    const delta = parsed.choices[0]?.delta;
-
-                    if (hasUsage(parsed.usage)) {
-                        usageTracker.recordUsage(parsed.usage);
-                        reportCopilotContextUsage(progress, parsed.usage);
-                    }
-
-                    if (!delta) {
-                        continue;
-                    }
-
-                    // Reasoning / thinking content (streaming delta)
-                    if (delta.reasoning_content) {
-                        outputChannel.debug(`Kimi reasoning delta received (${delta.reasoning_content.length} chars)`);
-                        handleReasoningDelta(delta.reasoning_content);
-                    }
-
-                    // Text content
-                    if (delta.content) {
-                        // Flush any buffered fallback reasoning before the first text chunk
-                        if (fallbackReasoningBuffer) {
-                            flushFallbackReasoning();
-                        }
-                        if (thinkingPartAvailable === undefined) {
-                            // No reasoning was seen — mark thinking as unavailable so we don't probe later
-                            thinkingPartAvailable = false;
-                        }
-                        progress.report(new vscode.LanguageModelTextPart(delta.content));
-                    }
-
-                    // Tool calls (accumulate across chunks)
-                    if (delta.tool_calls) {
-                        for (const tc of delta.tool_calls) {
-                            let existing = pendingToolCalls.get(tc.index);
-                            if (!existing) {
-                                existing = { id: '', name: '', args: '' };
-                                pendingToolCalls.set(tc.index, existing);
-                            }
-
-                            if (tc.id) {
-                                existing.id = tc.id;
-                            }
-                            if (tc.function?.name) {
-                                existing.name += tc.function.name;
-                            }
-                            if (tc.function?.arguments) {
-                                existing.args += tc.function.arguments;
-                            }
-                        }
-                    }
-
-                    // Emit completed tool calls on finish
-                    if (parsed.choices[0].finish_reason) {
-                        if (fallbackReasoningBuffer) {
-                            flushFallbackReasoning();
-                        }
-                        emitPendingToolCalls();
-                    }
-                } catch (parseErr) {
-                    outputChannel.warn('Skipping malformed SSE chunk', parseErr);
-                }
             }
         }
-    } finally {
-        try {
-            reader.releaseLock();
-        } catch {
-            /* already released */
+    } catch (err) {
+        if (err instanceof OpenAI.APIError) {
+            throw err; // Let the caller's error handler deal with it
+        }
+        throw err;
+    }
+
+    // Stream ended — flush any remaining state
+    if (fallbackReasoningBuffer) flushFallbackReasoning();
+    emitPendingToolCalls();
+
+    const streamEnd = Date.now();
+    return {
+        ttftMs: firstChunkAt !== undefined ? firstChunkAt - streamStart : streamEnd - streamStart,
+        streamDurationMs: firstChunkAt !== undefined ? streamEnd - firstChunkAt : 0,
+        chunkCount,
+    };
+}
+
+/**
+ * Extract usage from a streaming chunk, checking both top-level and
+ * choices[0].usage (Moonshot proprietary placement).
+ */
+function extractChunkUsage(chunk: Record<string, unknown>): {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+    cached_tokens?: number;
+} | null {
+    // Top-level usage
+    const topUsage = chunk['usage'];
+    if (topUsage !== null && topUsage !== undefined && typeof topUsage === 'object') {
+        const u = topUsage as Record<string, unknown>;
+        if (typeof u['total_tokens'] === 'number') {
+            return {
+                prompt_tokens: (typeof u['prompt_tokens'] === 'number' ? u['prompt_tokens'] : 0) as number,
+                completion_tokens: (typeof u['completion_tokens'] === 'number' ? u['completion_tokens'] : 0) as number,
+                total_tokens: u['total_tokens'] as number,
+                cached_tokens: typeof u['cached_tokens'] === 'number' ? u['cached_tokens'] as number : undefined,
+            };
         }
     }
+    // choices[0].usage (Moonshot proprietary)
+    const choices = chunk['choices'];
+    if (!Array.isArray(choices) || choices.length === 0) return null;
+    const firstChoice = choices[0] as Record<string, unknown> | undefined;
+    if (!firstChoice) return null;
+    const choiceUsage = firstChoice['usage'];
+    if (choiceUsage !== null && choiceUsage !== undefined && typeof choiceUsage === 'object') {
+        const u = choiceUsage as Record<string, unknown>;
+        if (typeof u['total_tokens'] === 'number') {
+            return {
+                prompt_tokens: (typeof u['prompt_tokens'] === 'number' ? u['prompt_tokens'] : 0) as number,
+                completion_tokens: (typeof u['completion_tokens'] === 'number' ? u['completion_tokens'] : 0) as number,
+                total_tokens: u['total_tokens'] as number,
+                cached_tokens: typeof u['cached_tokens'] === 'number' ? u['cached_tokens'] as number : undefined,
+            };
+        }
+    }
+    return null;
 }
 
 function safeParseArgs(args: string): Record<string, unknown> {

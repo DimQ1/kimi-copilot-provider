@@ -3,7 +3,7 @@
 .vscode-test.mjs
 .github/**
 src/**
-node_modules/
+/node_modules/**
 .gitignore
 .git/**
 tsconfig.json
@@ -18,3 +18,4 @@ out/test/**
 agent-core-review/
 goal-pursuit/
 *.vsix
+analysis--*.md

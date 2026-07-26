@@ -75,6 +75,8 @@ export interface KimiRequest {
 	max_completion_tokens?: number;
 	tools?: KimiTool[];
 	tool_choice?: 'none' | 'auto' | 'required';
+	/** Extra body fields passed through to the API (e.g. thinking.keep). */
+	extra_body?: Record<string, unknown>;
 }
 
 export interface KimiStreamChunk {
@@ -163,6 +165,13 @@ export interface ModelConfigOverride {
 	 * Falls back to the global setting, then to the built-in default.
 	 */
 	transliterateSystemPrompt?: string;
+	/**
+	 * When set to 'all' (or another keep value), sends previous reasoning
+	 * content back to the API so the model can see its own thinking from
+	 * prior turns. Improves quality in multi-step tool-calling dialogs.
+	 * Mirrors kimi-code's thinking.keep / extra_body.thinking.keep.
+	 */
+	thinkingKeep?: string;
 }
 
 export interface ModelDefinition {

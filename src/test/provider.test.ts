@@ -408,8 +408,10 @@ suite('provider helpers', () => {
             test('parses an HTTP-date', () => {
                 const future = new Date(Date.now() + 3000).toUTCString();
                 const parsed = parseRetryAfterHeader(future);
-                assert.ok(parsed !== undefined);
-                assert.ok(parsed >= 0 && parsed <= 3000);
+                assert.ok(parsed !== null);
+                if (parsed !== null) {
+                    assert.ok(parsed >= 0 && parsed <= 3000);
+                }
             });
 
             test('clamps a past HTTP-date to zero', () => {
@@ -417,12 +419,12 @@ suite('provider helpers', () => {
                 assert.strictEqual(parseRetryAfterHeader(past), 0);
             });
 
-            test('returns undefined for absent or invalid values', () => {
-                assert.strictEqual(parseRetryAfterHeader(null), undefined);
-                assert.strictEqual(parseRetryAfterHeader(undefined), undefined);
-                assert.strictEqual(parseRetryAfterHeader(''), undefined);
-                assert.strictEqual(parseRetryAfterHeader('not-a-date'), undefined);
-                assert.strictEqual(parseRetryAfterHeader('-3'), undefined);
+            test('returns null for absent or invalid values', () => {
+                assert.strictEqual(parseRetryAfterHeader(null), null);
+                assert.strictEqual(parseRetryAfterHeader(undefined), null);
+                assert.strictEqual(parseRetryAfterHeader(''), null);
+                assert.strictEqual(parseRetryAfterHeader('not-a-date'), null);
+                assert.strictEqual(parseRetryAfterHeader('-3'), null);
             });
         });
 

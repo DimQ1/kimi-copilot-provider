@@ -5,14 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.8.7] - 2026-07-24
-
-### Fixed
-- **Circular import crash**: `models.ts` → `model-registry.ts` → `models.ts` caused extension to fail loading after GoF refactoring. Broke the cycle by moving deprecated helpers to local logic.
-- Unused ESLint imports (`KimiStreamChunk`, `KimiUsage` in `api-client.ts`) causing CI failures.
+## [1.9.0] - 2026-07-25
 
 ### Changed
-- Extracted commands, HTTP client, error handlers, request builder, and request policy into dedicated files (GoF patterns: Facade, Builder, Strategy, Command, Chain of Responsibility).
+- **OpenAI SDK**: Replaced raw `fetch()` + manual SSE parsing with the official `openai` SDK (v6.x, same as kimi-code). The SDK's `withResponse()` gives access to `x-trace-id` from response headers before the stream body — trace IDs are now logged for every request.
+- **Reasoning dialect auto-detection**: Ported `ReasoningKeyDialect` from kimi-code's kosong layer. The provider now scans `reasoning_content`, `reasoning`, and `reasoning_details` (in priority order) and remembers which key the server used, echoing thinking back under the same key.
+- **JSON Schema normalization for tools**: Ported `normalizeKimiToolSchema` + `derefJsonSchema` from kimi-code. Tool input schemas with `$ref` pointers are now dereferenced and missing `type` fields are inferred before sending.
+- **Tool call ID sanitization**: Tool call IDs are now normalized to at most 64 characters and safe characters (`a-zA-Z0-9_-`).
+- **Completion budget clamping**: `maxTokens` is now clamped against remaining context window space (`min(requested, window − estimatedInput)`), preventing API rejections when the context is near full.
+- **Stream instrumentation**: TTFT (time-to-first-token), decode duration, and chunk count are now logged per request alongside the trace-id.
+- **Auto-compact threshold**: When the completion budget is cut by more than 50%, auto-compact triggers proactively so the next request has room.
+- **Echo thinking / keep**: New `thinkingKeep` option sends previous reasoning content back to the API, improving multi-step tool-calling quality.
+- **Message-level tools**: Tools are now injected into the system message as `messages[].tools` for progressive tool disclosure.
+- **Context overflow retry**: When the API returns `context_length_exceeded`, auto-compact runs first, then the same request is retried once — no manual resend needed.
+
+### Fixed
+- `parseRetryAfterMs` return type changed from `number | undefined` to `number | null` for consistency with the OpenAI SDK error path.
 
 ## [1.8.5] - 2026-07-21
 

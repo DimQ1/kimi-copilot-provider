@@ -60,6 +60,7 @@ export class KimiRequestBuilder {
 	private _frequencyPenalty = 0.0;
 	private _thinking?: { type: 'enabled' | 'disabled' };
 	private _reasoningEffort?: 'low' | 'high' | 'max';
+	private _thinkingKeep?: string;
 	private _maxTokens = 32768;
 	private _requestPolicy: 'k2' | 'k3' = 'k2';
 
@@ -142,6 +143,16 @@ export class KimiRequestBuilder {
 		return this;
 	}
 
+	/**
+	 * Sets the thinking keep value (e.g. 'all'). When set, previous reasoning
+	 * content is echoed back to the API so the model can see its own thinking.
+	 * Mirrors kimi-code's extra_body.thinking.keep.
+	 */
+	withThinkingKeep(keep: string | undefined): this {
+		this._thinkingKeep = keep;
+		return this;
+	}
+
 	// ── Parameter resolution ────────────────────────────────────────
 
 	private resolveTemperature(): number {
@@ -213,6 +224,20 @@ export class KimiRequestBuilder {
 			if (this._thinking) {
 				request.thinking = this._thinking;
 			}
+		}
+
+		// Thinking keep: echo previous reasoning back to the API.
+		// Only meaningful when thinking is enabled (not disabled).
+		const thinkingEnabled =
+			this._requestPolicy === 'k3' || this._thinking?.type !== 'disabled';
+		if (thinkingEnabled && this._thinkingKeep) {
+			request.extra_body = {
+				...(request.extra_body ?? {}),
+				thinking: {
+					...(request.extra_body?.thinking ?? {}),
+					keep: this._thinkingKeep,
+				},
+			};
 		}
 
 		// Tools
