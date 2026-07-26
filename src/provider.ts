@@ -43,6 +43,13 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
     private readonly disposables: vscode.Disposable[] = [];
     /** Guards against repeatedly triggering compaction within one session. */
     private autoCompactTriggered = false;
+    /**
+     * Per-endpoint reasoning-field dialect: learns which wire key the server
+     * uses (reasoning_content / reasoning / reasoning_details) and echoes
+     * thinking back under the same key. Persistent across requests — mirrors
+     * kimi-code's shared ReasoningKeyDialect per provider instance.
+     */
+    private readonly reasoningDialect = new ReasoningKeyDialect();
 
     constructor(
         private readonly configManager: ConfigurationManager,
@@ -328,7 +335,6 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
         );
 
         const startTime = Date.now();
-        const reasoningDialect = new ReasoningKeyDialect();
 
         try {
             const chatResult = await apiClient.chat(request, token);
@@ -348,7 +354,7 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
                     token,
                     this.outputChannel,
                     this.usageTracker,
-                    reasoningDialect,
+                    this.reasoningDialect,
                 );
                 this.outputChannel.info(
                     `← stream done: TTFT ${timing.ttftMs}ms, decode ${timing.streamDurationMs}ms, ${timing.chunkCount} chunks, network ${networkTime}ms, total ${Date.now() - startTime}ms`,
@@ -359,7 +365,7 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
                     progress,
                     this.outputChannel,
                     this.usageTracker,
-                    reasoningDialect,
+                    this.reasoningDialect,
                 );
                 this.outputChannel.info(`← completed in ${Date.now() - startTime}ms (non-streaming)`);
             }

@@ -121,13 +121,12 @@ export class KimiApiClient {
 		let lastError: unknown;
 
 		for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+			const { signal, cleanup } = this.createTimeoutSignal(token);
 			try {
-				const signal = this.createTimeoutSignal(token);
-
 				// withResponse() resolves when headers arrive, before the stream body.
 				const { data, response } = await this.client.chat.completions
 					.create(
-						request as unknown as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming,
+						request as unknown as OpenAI.Chat.Completions.ChatCompletionCreateParams,
 						{ signal },
 					)
 					.withResponse();
@@ -168,22 +167,29 @@ export class KimiApiClient {
 				const retryAfterMs = extractRetryAfterFromError(err);
 				const delayMs = this.computeRetryDelay(attempt, retryAfterMs ?? undefined);
 				await this.sleep(delayMs, token);
+			} finally {
+				cleanup();
 			}
 		}
 		throw this.translateError(lastError);
 	}
 
-	private createTimeoutSignal(token: vscode.CancellationToken): AbortSignal {
+	private createTimeoutSignal(
+		token: vscode.CancellationToken,
+	): { signal: AbortSignal; cleanup: () => void } {
 		const controller = new AbortController();
 		const timeout = setTimeout(() => controller.abort(), this.options.timeoutMs);
 		const disposable = token.onCancellationRequested(() => controller.abort());
 
-		controller.signal.addEventListener('abort', () => {
+		const cleanup = (): void => {
 			clearTimeout(timeout);
 			disposable.dispose();
-		}, { once: true });
+		};
 
-		return controller.signal;
+		// Defense-in-depth: also clean up if the signal itself is aborted.
+		controller.signal.addEventListener('abort', cleanup, { once: true });
+
+		return { signal: controller.signal, cleanup };
 	}
 
 	private isRetryableError(err: unknown): boolean {
@@ -204,9 +210,12 @@ export class KimiApiClient {
 
 	private translateError(err: unknown): Error {
 		if (err instanceof OpenAI.APIError) {
-			const apiMsg = parseApiMessage(err);
+			const parsed = parseApiErrorJson(err);
+			const apiMsg: string = parsed
+				? `${parsed.message}${parsed.type ? ` [${parsed.type}]` : ''}`
+				: ((err as { message?: string }).message ?? String(err));
 
-			// Check for context-length overflow first
+			// Check for context-length overflow first (uses parsed body, no re-parse)
 			if (err.status === 400 && isOpenAIContextOverflow(err)) {
 				return new vscode.LanguageModelError(
 					`Kimi API context overflow: ${apiMsg}. Start a new chat, run "/compact", or remove files from the context. (HTTP 400)`,
@@ -295,19 +304,33 @@ function extractRetryAfterFromError(err: unknown): number | null {
  */
 function parseApiMessage(err: unknown): string {
 	if (err instanceof OpenAI.APIError) {
-		try {
-			const body = (err as { message?: string }).message ?? '';
-			const parsed = JSON.parse(body) as { error?: { message?: string; type?: string } };
-			if (parsed.error?.message) {
-				const type = parsed.error.type ? ` [${parsed.error.type}]` : '';
-				return `${parsed.error.message.trim()}${type}`;
-			}
-		} catch {
-			// not JSON — use the SDK message directly
+		const parsed = parseApiErrorJson(err);
+		if (parsed) {
+			const type = parsed.type ? ` [${parsed.type}]` : '';
+			return `${parsed.message}${type}`;
 		}
 		return (err as { message?: string }).message ?? String(err);
 	}
 	return String(err);
+}
+
+interface ParsedApiError { message: string; type?: string }
+
+/**
+ * Try to parse the structured Kimi API error from an OpenAI SDK error.
+ * Returns null when the body is not valid JSON or missing error.message.
+ */
+function parseApiErrorJson(err: unknown): ParsedApiError | null {
+	if (!(err instanceof OpenAI.APIError)) return null;
+	const apiErr: { message?: string } = err;
+	try {
+		const body = apiErr.message ?? '';
+		const parsed = JSON.parse(body) as { error?: { message?: string; type?: string } };
+		if (parsed.error?.message) {
+			return { message: parsed.error.message.trim(), type: parsed.error.type };
+		}
+	} catch { /* not JSON */ }
+	return null;
 }
 
 /**
