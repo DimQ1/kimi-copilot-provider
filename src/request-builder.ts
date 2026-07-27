@@ -214,7 +214,12 @@ export class KimiRequestBuilder {
 
 		if (this._requestPolicy === 'k3') {
 			request.max_completion_tokens = this._maxTokens;
-			request.reasoning_effort = this._reasoningEffort ?? 'max';
+			// Honor an explicit thinking-off: don't leak reasoning_effort to the
+			// wire — the effort field would silently switch reasoning back on.
+			// Mirrors kimi-code's withThinking('off') handling (commit 3d5d630c1).
+			if (this._thinking?.type !== 'disabled') {
+				request.reasoning_effort = this._reasoningEffort ?? 'max';
+			}
 		} else {
 			request.temperature = this._temperature;
 			request.top_p = this._topP;
@@ -228,8 +233,7 @@ export class KimiRequestBuilder {
 
 		// Thinking keep: echo previous reasoning back to the API.
 		// Only meaningful when thinking is enabled (not disabled).
-		const thinkingEnabled =
-			this._requestPolicy === 'k3' || this._thinking?.type !== 'disabled';
+		const thinkingEnabled = this._thinking?.type !== 'disabled';
 		if (thinkingEnabled && this._thinkingKeep) {
 			request.extra_body = {
 				...(request.extra_body ?? {}),

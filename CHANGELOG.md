@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.1] - 2026-07-27
+
+### Added
+- **Hardened retries** (ported from kimi-code `9f66ec416` / `074bb9ba1`): transient statuses 408/409/429/529 and 5xx are retried, an embedded upstream `status_code=429` inside a stream error body is recognized, and dropped streams (undici `terminated`, `ECONNRESET`, `socket hang up`) are retried as connection errors. Server `Retry-After` continues to take precedence over local backoff.
+- **Degraded-media retry on HTTP 413** (ported from kimi-code `1bf2c9afe`): when the API rejects the request body as too large (413 or a folded 400), images are replaced with text markers and the request is resent once automatically, with a user-visible warning.
+- **Unsupported image format refusal** (ported from kimi-code `db61c9e2d`): AVIF/HEIC/BMP/TIFF/ICO images are rejected locally with a clear error instead of poisoning the session with a repeating API 400 on every turn.
+- **Vacuous assistant message guard** (ported from kimi-code `71bcfba54`): assistant messages holding neither content nor tool calls are dropped before sending — they used to wedge sessions with a repeating "message must not be empty" 400.
+
+### Fixed
+- **Empty system prompt**: the provider no longer injects a `system` message with empty content when `kimiCopilot.systemPrompt` is cleared — the request is sent without a system message instead of being rejected by the API.
+- **Explicit thinking off** (ported from kimi-code `3d5d630c1`): when thinking is disabled, `reasoning_effort` is no longer sent on K3 requests and `thinking.keep` is suppressed, so the effort field can't silently switch reasoning back on.
+
 ## [1.9.0] - 2026-07-25
 
 ### Changed

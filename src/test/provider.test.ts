@@ -1,6 +1,7 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
-import { buildKimiRequest, convertMessages, convertTools, extractTextContent, resolveReasoningEffort, formatThinkingAsText, tryReportThinkingPart, parseRetryAfterHeader, computeBackoffDelayMs } from '../provider';
+import { buildKimiRequest, convertMessages, convertTools, extractTextContent, resolveReasoningEffort, formatThinkingAsText, tryReportThinkingPart, parseRetryAfterHeader, computeBackoffDelayMs, stripImagesToMarkers, isSupportedImageMimeType } from '../provider';
+import type { KimiRequest } from '../types';
 import { MODELS, toChatInfo } from '../models';
 import { applyServerModels } from '../models-client';
 import type { KimiTool } from '../types';
@@ -120,6 +121,9 @@ suite('provider helpers', () => {
 
         test('converts tool result parts', () => {
             const messages = [
+                vscode.LanguageModelChatMessage.Assistant([
+                    new vscode.LanguageModelToolCallPart('call-1', 'getWeather', { city: 'Paris' }),
+                ]),
                 vscode.LanguageModelChatMessage.User([
                     new vscode.LanguageModelToolResultPart('call-1', [
                         new vscode.LanguageModelTextPart('Sunny'),
@@ -128,10 +132,23 @@ suite('provider helpers', () => {
             ];
 
             const result = convertMessages(messages);
-            assert.strictEqual(result.length, 1);
-            assert.strictEqual(result[0].role, 'tool');
-            assert.strictEqual(result[0].content, 'Sunny');
-            assert.strictEqual(result[0].tool_call_id, 'call-1');
+            assert.strictEqual(result.length, 2);
+            assert.strictEqual(result[0].role, 'assistant');
+            assert.strictEqual(result[1].role, 'tool');
+            assert.strictEqual(result[1].content, 'Sunny');
+            assert.strictEqual(result[1].tool_call_id, 'call-1');
+        });
+
+        test('drops orphan tool results without a matching tool call', () => {
+            const messages = [
+                vscode.LanguageModelChatMessage.User([
+                    new vscode.LanguageModelToolResultPart('call-missing', [
+                        new vscode.LanguageModelTextPart('Sunny'),
+                    ]),
+                ]),
+            ];
+            const result = convertMessages(messages);
+            assert.strictEqual(result.length, 0);
         });
 
         test('converts image data parts to Kimi vision content', () => {
@@ -150,6 +167,75 @@ suite('provider helpers', () => {
                     image_url: { url: 'data:image/png;base64,AQID' },
                 },
             ]);
+        });
+
+        test('rejects unsupported image formats early', () => {
+            const messages = [
+                vscode.LanguageModelChatMessage.User([
+                    new vscode.LanguageModelDataPart(new Uint8Array([1, 2, 3]), 'image/heic'),
+                ]),
+            ];
+            assert.throws(() => convertMessages(messages), /Unsupported image format/);
+        });
+
+        test('drops vacuous assistant messages with no content and no tool calls', () => {
+            const messages = [
+                vscode.LanguageModelChatMessage.User('hello'),
+                vscode.LanguageModelChatMessage.Assistant([]),
+                vscode.LanguageModelChatMessage.User('again'),
+            ];
+            const result = convertMessages(messages);
+            assert.strictEqual(result.length, 2);
+            assert.ok(result.every((m) => m.role === 'user'));
+        });
+    });
+
+    suite('stripImagesToMarkers', () => {
+        test('replaces image parts with text markers', () => {
+            const request: KimiRequest = {
+                model: 'kimi-k3',
+                stream: false,
+                messages: [
+                    {
+                        role: 'user',
+                        content: [
+                            { type: 'text', text: 'look' },
+                            { type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } },
+                        ],
+                    },
+                    { role: 'user', content: 'plain' },
+                ],
+            };
+            const degraded = stripImagesToMarkers(request);
+            assert.ok(degraded);
+            const parts = degraded!.messages[0].content as Array<{ type: string; text?: string }>;
+            assert.strictEqual(parts.length, 2);
+            assert.strictEqual(parts[1].type, 'text');
+            assert.match(parts[1].text ?? '', /image removed/);
+            assert.strictEqual(degraded!.messages[1].content, 'plain');
+        });
+
+        test('returns null when the request has no images', () => {
+            const request: KimiRequest = {
+                model: 'kimi-k3',
+                stream: false,
+                messages: [{ role: 'user', content: 'no images here' }],
+            };
+            assert.strictEqual(stripImagesToMarkers(request), null);
+        });
+    });
+
+    suite('isSupportedImageMimeType', () => {
+        test('accepts png/jpeg/gif/webp', () => {
+            for (const mime of ['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/webp']) {
+                assert.ok(isSupportedImageMimeType(mime), mime);
+            }
+        });
+
+        test('rejects avif/heic/bmp/tiff/ico', () => {
+            for (const mime of ['image/avif', 'image/heic', 'image/bmp', 'image/tiff', 'image/x-icon']) {
+                assert.ok(!isSupportedImageMimeType(mime), mime);
+            }
         });
     });
 

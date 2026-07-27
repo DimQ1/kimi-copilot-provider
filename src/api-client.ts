@@ -25,6 +25,14 @@ export interface ApiClientOptions {
 	 * room. When omitted, context overflow is non-retryable.
 	 */
 	onContextOverflow?: () => void | Promise<void>;
+	/**
+	 * Called when the API rejects the request body as too large (HTTP 413 or
+	 * a 400 "request too large" marker). Should return a degraded copy of the
+	 * request (e.g. images replaced with text markers) or null/undefined when
+	 * no degradation is possible — then the error is fatal. Mirrors kimi-code's
+	 * "resend with degraded media" behavior (commit 1bf2c9afe).
+	 */
+	onRequestTooLarge?: (request: KimiRequest) => KimiRequest | null | undefined;
 }
 
 const DEFAULT_OPTIONS: ApiClientOptions = {
@@ -119,6 +127,8 @@ export class KimiApiClient {
 	): Promise<ChatResult> {
 		const maxAttempts = this.options.maxRetries + 1;
 		let lastError: unknown;
+		let activeRequest = request;
+		let mediaDegraded = false;
 
 		for (let attempt = 1; attempt <= maxAttempts; attempt++) {
 			const { signal, cleanup } = this.createTimeoutSignal(token);
@@ -126,7 +136,7 @@ export class KimiApiClient {
 				// withResponse() resolves when headers arrive, before the stream body.
 				const { data, response } = await this.client.chat.completions
 					.create(
-						request as unknown as OpenAI.Chat.Completions.ChatCompletionCreateParams,
+						activeRequest as unknown as OpenAI.Chat.Completions.ChatCompletionCreateParams,
 						{ signal },
 					)
 					.withResponse();
@@ -142,6 +152,20 @@ export class KimiApiClient {
 				};
 			} catch (err) {
 				lastError = err;
+
+				// Request body too large: degrade media once and resend.
+				// The callback swaps images for text markers so the retry fits
+				// the provider's body cap (mirrors kimi-code commit 1bf2c9afe).
+				if (!mediaDegraded && isRequestTooLargeError(err) && this.options.onRequestTooLarge) {
+					const degraded = this.options.onRequestTooLarge(activeRequest);
+					if (degraded && attempt < maxAttempts && !token.isCancellationRequested) {
+						activeRequest = degraded;
+						mediaDegraded = true;
+						const delayMs = this.computeRetryDelay(attempt, undefined);
+						await this.sleep(delayMs, token);
+						continue;
+					}
+				}
 
 				// Context-length overflow: trigger compaction callback, then retry once.
 				// The callback (auto-compact) frees context space so the retry can succeed.
@@ -194,15 +218,37 @@ export class KimiApiClient {
 
 	private isRetryableError(err: unknown): boolean {
 		if (err instanceof OpenAI.APIError) {
-			return err.status === 429 || err.status >= 500;
+			// Transient statuses worth retrying. 408 Request Timeout, 409 Conflict
+			// (upstream overload marker on some gateways), 429 rate limit, 5xx
+			// server errors, and 529 "Site is overloaded" (Cloudflare-style).
+			// Mirrors kimi-code's chatWithRetry hardening (commit 9f66ec416).
+			if (err.status === 408 || err.status === 409 || err.status === 429 || err.status === 529) {
+				return true;
+			}
+			if (err.status >= 500) {
+				return true;
+			}
+			// Embedded upstream 429 inside a stream error body — the HTTP status
+			// may be 200/400 while the payload reports status_code=429.
+			const body = (err as { message?: string }).message ?? '';
+			if (/"status_code"\s*:\s*429/.test(body) || /"code"\s*:\s*"?429"?/.test(body)) {
+				return true;
+			}
+			return false;
 		}
 		if (err instanceof Error) {
 			const msg = err.message.toLowerCase();
+			// `terminated` — undici's raw "response body cut mid-flight" error,
+			// common on long streaming responses. Classify as retryable
+			// (mirrors kimi-code commit 074bb9ba1).
 			return (
 				msg.includes('fetch failed') ||
 				msg.includes('econnrefused') ||
 				msg.includes('enotfound') ||
-				msg.includes('timeout')
+				msg.includes('timeout') ||
+				msg.includes('terminated') ||
+				msg.includes('econnreset') ||
+				msg.includes('socket hang up')
 			);
 		}
 		return false;
@@ -219,6 +265,13 @@ export class KimiApiClient {
 			if (err.status === 400 && isOpenAIContextOverflow(err)) {
 				return new vscode.LanguageModelError(
 					`Kimi API context overflow: ${apiMsg}. Start a new chat, run "/compact", or remove files from the context. (HTTP 400)`,
+				);
+			}
+
+			// Request body too large (413 or folded 400)
+			if (isRequestTooLargeError(err)) {
+				return new vscode.LanguageModelError(
+					`Kimi API rejected the request body as too large: ${apiMsg}. Remove images or large attachments from the context. (HTTP ${err.status})`,
 				);
 			}
 
@@ -329,6 +382,25 @@ function isOpenAIContextOverflow(err: unknown): boolean {
 		body.includes('token limit') ||
 		body.includes('context length') ||
 		body.includes('maximum context')
+	);
+}
+
+/**
+ * Detects "request body too large" rejections: the dedicated HTTP 413, or a
+ * 400 whose message reports an oversized request body (some gateways fold 413
+ * into 400). Mirrors kimi-code's request-body-too-large error classification.
+ */
+export function isRequestTooLargeError(err: unknown): boolean {
+	if (!(err instanceof OpenAI.APIError)) return false;
+	if (err.status === 413) return true;
+	if (err.status !== 400) return false;
+	const body = ((err as { message?: string }).message ?? '').toLowerCase();
+	return (
+		body.includes('request entity too large') ||
+		body.includes('request too large') ||
+		body.includes('body too large') ||
+		body.includes('payload too large') ||
+		body.includes('exceeds the maximum allowed size')
 	);
 }
 

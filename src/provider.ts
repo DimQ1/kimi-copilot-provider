@@ -328,6 +328,20 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
                 this.outputChannel.warn('Context overflow from API — compacting before retry.');
                 this.triggerAutoCompact('api', false);
             },
+            // Retry once on "body too large": strip images to text markers so
+            // the degraded request fits the provider's body cap.
+            // Mirrors kimi-code's degraded-media resend (commit 1bf2c9afe).
+            onRequestTooLarge: (req) => {
+                const degraded = stripImagesToMarkers(req);
+                if (!degraded) return null;
+                this.outputChannel.warn(
+                    'Request body too large — resending with images replaced by text markers.',
+                );
+                void vscode.window.showWarningMessage(
+                    'Kimi Copilot: the request was too large, so attached images were removed and the request was retried.',
+                );
+                return degraded;
+            },
         });
 
         this.outputChannel.info(
@@ -540,6 +554,13 @@ export function convertMessages(
                 contentParts.push({ type: 'text', text: part.value });
             } else if (isLanguageModelDataPart(part)) {
                 if (part.mimeType.startsWith('image/')) {
+                    if (!isSupportedImageMimeType(part.mimeType)) {
+                        // Refuse formats the API rejects — forwarding them would
+                        // poison the session with a repeating 400 on every turn.
+                        throw new vscode.LanguageModelError(
+                            `Unsupported image format "${part.mimeType}". The Kimi API accepts only PNG, JPEG, GIF, and WebP. Convert the image and try again.`,
+                        );
+                    }
                     contentParts.push({
                         type: 'image_url',
                         image_url: {
@@ -610,13 +631,86 @@ export function convertMessages(
         }
     }
 
-    return result;
+    // Drop vacuous assistant messages: an assistant turn holding neither
+    // content nor tool calls serializes as an empty message, which strict
+    // endpoints reject with "the message at position N with role 'assistant'
+    // must not be empty" on every resend — permanently wedging the session.
+    // Mirrors kimi-code commit 71bcfba54.
+    const cleaned: KimiMessage[] = [];
+    for (const msg of result) {
+        if (msg.role === 'assistant' && !msg.content && (!msg.tool_calls || msg.tool_calls.length === 0)) {
+            continue;
+        }
+        cleaned.push(msg);
+    }
+
+    // Drop orphan tool results: a tool message is only valid when the wire
+    // history contains an assistant tool_call with the same id. After the
+    // vacuous-assistant cleanup above (or a malformed upstream history), a
+    // tool result may reference a call that no longer exists — the API
+    // rejects such histories with a 400 on every turn.
+    const knownCallIds = new Set<string>();
+    for (const msg of cleaned) {
+        if (msg.role === 'assistant' && msg.tool_calls) {
+            for (const tc of msg.tool_calls) knownCallIds.add(tc.id);
+        }
+    }
+    const hasToolMessages = cleaned.some((m) => m.role === 'tool');
+    if (!hasToolMessages) {
+        return cleaned;
+    }
+    return cleaned.filter(
+        (msg) => msg.role !== 'tool' || (msg.tool_call_id !== undefined && knownCallIds.has(msg.tool_call_id)),
+    );
 }
 
 function isLanguageModelDataPart(
     part: unknown,
 ): part is vscode.LanguageModelDataPart {
     return typeof vscode.LanguageModelDataPart !== 'undefined' && part instanceof vscode.LanguageModelDataPart;
+}
+
+/**
+ * Image MIME types the Kimi API accepts. Formats outside this list (AVIF,
+ * HEIC, BMP, TIFF, ICO) are rejected by the API with HTTP 400 — and because
+ * the image stays in the chat history, the 400 repeats on every later turn,
+ * poisoning the session. Mirrors kimi-code commit db61c9e2d: refuse early.
+ */
+export const SUPPORTED_IMAGE_MIME_TYPES = new Set([
+    'image/png',
+    'image/jpeg',
+    'image/jpg',
+    'image/gif',
+    'image/webp',
+]);
+
+export function isSupportedImageMimeType(mimeType: string): boolean {
+    return SUPPORTED_IMAGE_MIME_TYPES.has(mimeType.toLowerCase());
+}
+
+/**
+ * Replaces every image part in the request with a text marker so the body
+ * fits the provider's size cap. Returns null when the request carries no
+ * images (nothing to degrade). Used for the degraded-media retry on
+ * "request body too large" rejections (kimi-code commit 1bf2c9afe).
+ */
+export function stripImagesToMarkers<T extends { messages: KimiMessage[] }>(request: T): T | null {
+    let stripped = 0;
+    const messages = request.messages.map((msg) => {
+        if (!Array.isArray(msg.content)) return msg;
+        let hasImage = false;
+        const parts: KimiContentPart[] = msg.content.map((part) => {
+            if (part.type === 'image_url') {
+                hasImage = true;
+                stripped++;
+                return { type: 'text' as const, text: '[image removed: request exceeded the API body size limit]' };
+            }
+            return part;
+        });
+        return hasImage ? { ...msg, content: parts } : msg;
+    });
+    if (stripped === 0) return null;
+    return { ...request, messages };
 }
 
 /**
