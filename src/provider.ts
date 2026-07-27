@@ -226,7 +226,7 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
 
         // ── Convert messages ────────────────────────────────────────
         const allMessages = convertMessages(messages);
-        if (!allMessages.some((m) => m.role === 'system')) {
+        if (systemPrompt.trim().length > 0 && !allMessages.some((m) => m.role === 'system')) {
             allMessages.unshift({ role: 'system', content: systemPrompt });
         }
 
