@@ -4,6 +4,7 @@ import { buildKimiRequest, convertMessages, convertTools, extractTextContent, re
 import type { KimiRequest } from '../types';
 import { MODELS, toChatInfo } from '../models';
 import { applyServerModels } from '../models-client';
+import { isQuotaExhaustedError, createErrorChain } from '../error-handlers';
 import type { KimiTool } from '../types';
 
 suite('provider helpers', () => {
@@ -564,6 +565,68 @@ suite('provider helpers', () => {
                     assert.ok(delay <= 4000 * 1.25 + 1, `upper bound: ${delay}`);
                 }
             });
+        });
+    });
+
+    suite('quota-exhausted 429 classification', () => {
+        test('detects Moonshot exceeded_current_quota_error in error.type', () => {
+            const body = JSON.stringify({
+                error: { message: 'You exceeded your current quota', type: 'exceeded_current_quota_error' },
+            });
+            assert.strictEqual(isQuotaExhaustedError(429, body), true);
+        });
+
+        test('detects OpenAI insufficient_quota in error.code', () => {
+            const body = JSON.stringify({
+                error: { message: 'You exceeded your current quota', code: 'insufficient_quota', type: 'insufficient_quota' },
+            });
+            assert.strictEqual(isQuotaExhaustedError(429, body), true);
+        });
+
+        test('detects billing wording in a non-JSON body', () => {
+            assert.strictEqual(
+                isQuotaExhaustedError(429, 'You exceeded your current token quota: please check your account balance'),
+                true,
+            );
+            assert.strictEqual(
+                isQuotaExhaustedError(429, 'Your account is suspended due to insufficient balance, please recharge your account'),
+                true,
+            );
+        });
+
+        test('does not match transient rate-limit wording', () => {
+            assert.strictEqual(isQuotaExhaustedError(429, 'rate limit reached: token quota per minute exceeded'), false);
+            assert.strictEqual(isQuotaExhaustedError(429, 'too many requests, slow down'), false);
+            assert.strictEqual(
+                isQuotaExhaustedError(429, JSON.stringify({ error: { message: 'too many requests', type: 'rate_limit_exceeded' } })),
+                false,
+            );
+        });
+
+        test('ignores non-429 statuses', () => {
+            const body = JSON.stringify({
+                error: { message: 'quota', type: 'exceeded_current_quota_error' },
+            });
+            assert.strictEqual(isQuotaExhaustedError(400, body), false);
+            assert.strictEqual(isQuotaExhaustedError(500, body), false);
+        });
+
+        test('error chain maps quota-429 to the top-up message', () => {
+            const chain = createErrorChain();
+            const body = JSON.stringify({
+                error: { message: 'You exceeded your current quota', type: 'exceeded_current_quota_error' },
+            });
+            const err = chain.handle(429, body);
+            assert.ok(err);
+            assert.ok(err!.message.includes('quota or balance is exhausted'));
+        });
+
+        test('error chain keeps generic rate-limit message for transient 429', () => {
+            const chain = createErrorChain();
+            const err = chain.handle(429, JSON.stringify({ error: { message: 'too many requests', type: 'rate_limit_exceeded' } }));
+            assert.ok(err);
+            assert.ok(!err!.message.includes('quota or balance is exhausted'));
+            assert.ok(err!.message.includes('HTTP 429'));
         });
     });
 });

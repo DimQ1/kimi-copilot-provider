@@ -25,6 +25,7 @@ interface KimiApiError {
 	error?: {
 		message?: string;
 		type?: string;
+		code?: string;
 	};
 }
 
@@ -94,6 +95,18 @@ class PaymentRequiredHandler extends BaseErrorHandler {
 			);
 		}
 		return null;
+	}
+}
+
+// ── Quota / balance exhausted (429, fail-fast) ─────────────────────
+
+class QuotaExhaustedHandler extends BaseErrorHandler {
+	protected tryHandle(status: number, body: string): vscode.LanguageModelError | null {
+		if (!isQuotaExhaustedError(status, body)) return null;
+		const apiMsg = parseApiErrorBody(body);
+		return new vscode.LanguageModelError(
+			`Kimi API: ${apiMsg} (HTTP 429). Your Kimi quota or balance is exhausted — top up your account or check your plan: https://www.kimi.com/code/console`,
+		);
 	}
 }
 
@@ -173,6 +186,7 @@ class FallbackHandler extends BaseErrorHandler {
 export function createErrorChain(): ErrorHandler {
 	const auth = new AuthErrorHandler();
 	const payment = new PaymentRequiredHandler();
+	const quotaExhausted = new QuotaExhaustedHandler();
 	const rateLimit = new RateLimitHandler();
 	const contextLength = new ContextLengthHandler();
 	const badRequest = new BadRequestHandler();
@@ -180,7 +194,9 @@ export function createErrorChain(): ErrorHandler {
 	const fallback = new FallbackHandler();
 
 	auth.setNext(payment);
-	payment.setNext(rateLimit);
+	// Quota exhaustion must precede the generic rate-limit handler for 429.
+	payment.setNext(quotaExhausted);
+	quotaExhausted.setNext(rateLimit);
 	rateLimit.setNext(contextLength);
 	contextLength.setNext(badRequest);
 	badRequest.setNext(serverError);
@@ -200,4 +216,61 @@ export function isContextLengthError(status: number, body: string): boolean {
 		text.includes('context length') ||
 		text.includes('maximum context')
 	);
+}
+
+// ── Quota-exhausted 429 classifier ─────────────────────────────────
+//
+// Mirrors kimi-code kosong's `classifyKimiQuotaError` (commit cdbd33c13):
+// a 429 whose body marks the Moonshot account's quota/balance as exhausted
+// must fail fast instead of being retried as a transient rate limit.
+
+/** Structured `error.type` / `error.code` values meaning quota exhaustion. */
+const QUOTA_EXHAUSTED_ERROR_CODES = new Set([
+	'exceeded_current_quota_error', // Moonshot
+	'insufficient_quota',           // OpenAI-compatible
+]);
+
+/**
+ * Message fallback for gateways that flatten the body to text. Anchored to
+ * billing wording — deliberately no bare /quota/ or /balance/, which would
+ * also match transient throttle messages like "token quota per minute".
+ */
+const QUOTA_EXHAUSTED_MESSAGE_PATTERNS = [
+	/exceeded your current (?:token )?quota/,
+	/check your account balance/,
+	/insufficient balance/,
+	/recharge your account|please recharge/,
+	/account (?:is )?in arrears/,
+] as const;
+
+/**
+ * Detects a quota/balance-exhausted 429 (as opposed to a transient rate
+ * limit) from a raw status + body pair. Handles both the raw JSON body
+ * string and pre-parsed SDK error messages containing embedded JSON.
+ */
+export function isQuotaExhaustedError(status: number, body: string): boolean {
+	if (status !== 429) return false;
+
+	// Structured path: parse the body and walk nested error objects.
+	try {
+		const parsed = JSON.parse(body) as Record<string, unknown>;
+		let current: Record<string, unknown> | undefined = parsed;
+		for (let depth = 0; current !== undefined && depth < 3; depth += 1) {
+			const code = current['code'];
+			if (typeof code === 'string' && QUOTA_EXHAUSTED_ERROR_CODES.has(code)) return true;
+			const type = current['type'];
+			if (typeof type === 'string' && QUOTA_EXHAUSTED_ERROR_CODES.has(type)) return true;
+			const nested: unknown = current['error'];
+			current =
+				typeof nested === 'object' && nested !== null
+					? (nested as Record<string, unknown>)
+					: undefined;
+		}
+	} catch {
+		// not JSON — fall through to the wording check
+	}
+
+	// Wording fallback: billing phrases in the (lowercased) body/message.
+	const lower = body.toLowerCase();
+	return QUOTA_EXHAUSTED_MESSAGE_PATTERNS.some((pattern) => pattern.test(lower));
 }

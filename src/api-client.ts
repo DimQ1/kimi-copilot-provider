@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import OpenAI from 'openai';
 import type { KimiRequest } from './types';
-import { createErrorChain, isContextLengthError } from './error-handlers';
+import { createErrorChain, isContextLengthError, isQuotaExhaustedError } from './error-handlers';
 
 // ═══════════════════════════════════════════════════════════════════════
 // KimiApiClient — GoF Facade pattern (OpenAI SDK–backed)
@@ -218,6 +218,11 @@ export class KimiApiClient {
 
 	private isRetryableError(err: unknown): boolean {
 		if (err instanceof OpenAI.APIError) {
+			// Quota/balance-exhausted 429 must fail fast — never retried
+			// (mirrors kimi-code kosong commit cdbd33c13).
+			if (isQuotaExhaustedApiError(err)) {
+				return false;
+			}
 			// Transient statuses worth retrying. 408 Request Timeout, 409 Conflict
 			// (upstream overload marker on some gateways), 429 rate limit, 5xx
 			// server errors, and 529 "Site is overloaded" (Cloudflare-style).
@@ -260,6 +265,13 @@ export class KimiApiClient {
 			const apiMsg: string = parsed
 				? `${parsed.message}${parsed.type ? ` [${parsed.type}]` : ''}`
 				: ((err as { message?: string }).message ?? String(err));
+
+			// Quota/balance-exhausted 429: dedicated message, no retry hint.
+			if (isQuotaExhaustedApiError(err)) {
+				return new vscode.LanguageModelError(
+					`Kimi API: ${apiMsg} (HTTP 429). Your Kimi quota or balance is exhausted — top up your account or check your plan: https://www.kimi.com/code/console`,
+				);
+			}
 
 			// Check for context-length overflow first (uses parsed body, no re-parse)
 			if (err.status === 400 && isOpenAIContextOverflow(err)) {
@@ -351,6 +363,32 @@ function extractRetryAfterFromError(err: unknown): number | null {
 }
 
 interface ParsedApiError { message: string; type?: string }
+
+/**
+ * Classify an OpenAI SDK error as a quota/balance-exhausted 429 using the
+ * shared predicate from error-handlers. The SDK hoists `error.type`/`error.code`
+ * to the top level and keeps the inner error object on `.error`; serializing
+ * the structured fields back to a body string lets `isQuotaExhaustedError`
+ * apply both the structured and the wording paths (mirrors kimi-code kosong
+ * commit cdbd33c13).
+ */
+function isQuotaExhaustedApiError(err: InstanceType<typeof OpenAI.APIError>): boolean {
+	if (err.status !== 429) return false;
+	const record = err as unknown as Record<string, unknown>;
+	const pieces: string[] = [];
+	const code = record['code'];
+	if (typeof code === 'string') pieces.push(JSON.stringify({ code }));
+	const type = record['type'];
+	if (typeof type === 'string') pieces.push(JSON.stringify({ type }));
+	const inner = record['error'];
+	if (typeof inner === 'object' && inner !== null) {
+		try { pieces.push(JSON.stringify(inner)); } catch { /* ignore */ }
+	}
+	const message = typeof record['message'] === 'string' ? record['message'] : '';
+	pieces.push(message);
+	const body = pieces.join(' ');
+	return isQuotaExhaustedError(429, body);
+}
 
 /**
  * Try to parse the structured Kimi API error from an OpenAI SDK error.

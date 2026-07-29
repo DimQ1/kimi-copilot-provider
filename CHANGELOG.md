@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.2] - 2026-07-28
+
+### Added
+- **Quota-exhausted 429 fail-fast** (ported from kimi-code kosong `cdbd33c13`): a 429 caused by an exhausted Moonshot quota/balance (`exceeded_current_quota_error`, `insufficient_quota`, or billing wording like "insufficient balance" / "recharge your account") is now distinguished from a transient rate limit. Such errors are no longer retried (previously they could burn the retry budget for nothing), and the user gets a clear "quota or balance is exhausted" message with a link to the Kimi console instead of a generic 429. Transient rate-limit wording (e.g. "token quota per minute") is deliberately not matched.
+
 ## [1.9.1] - 2026-07-27
 
 ### Added
