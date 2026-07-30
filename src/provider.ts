@@ -395,7 +395,7 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
                     { cause: err },
                 );
             }
-            if (message.includes('aborted') || message.includes('AbortError')) {
+            if (message.includes('aborted') || message.includes('AbortError') || (err instanceof Error && err.name === 'AbortError')) {
                 throw new vscode.LanguageModelError(
                     'Kimi API request was cancelled or timed out.',
                     { cause: err },

@@ -260,6 +260,17 @@ export class KimiApiClient {
 	}
 
 	private translateError(err: unknown): Error {
+		// Aborts (user cancellation via CancellationToken, or our own timeout)
+		// surface as the OpenAI SDK's APIUserAbortError — an APIError subclass
+		// with `status === undefined` — so they must be handled before the
+		// APIError branch, or the user sees "(HTTP undefined)".
+		if (isAbortLikeError(err)) {
+			return new vscode.LanguageModelError(
+				'Kimi API request was cancelled or timed out.',
+				{ cause: err instanceof Error ? err : undefined },
+			);
+		}
+
 		if (err instanceof OpenAI.APIError) {
 			const parsed = parseApiErrorJson(err);
 			const apiMsg: string = parsed
@@ -298,12 +309,6 @@ export class KimiApiClient {
 			if (msg.includes('fetch failed') || msg.includes('ENOTFOUND') || msg.includes('ECONNREFUSED')) {
 				return new vscode.LanguageModelError(
 					`Unable to reach Kimi API at ${this.endpoint}. Check your network connection.`,
-					{ cause: err },
-				);
-			}
-			if (msg.includes('aborted') || msg.includes('AbortError') || err.name === 'AbortError') {
-				return new vscode.LanguageModelError(
-					'Kimi API request was cancelled or timed out.',
 					{ cause: err },
 				);
 			}
@@ -363,6 +368,22 @@ function extractRetryAfterFromError(err: unknown): number | null {
 }
 
 interface ParsedApiError { message: string; type?: string }
+
+/**
+ * Detect request aborts: VS Code cancellation or our own timeout abort the
+ * fetch signal, and the OpenAI SDK wraps that in APIUserAbortError — an
+ * APIError subclass with `status === undefined` and a message containing
+ * "aborted"/"AbortError". Plain DOMExceptions also have name AbortError.
+ */
+function isAbortLikeError(err: unknown): boolean {
+	if (!(err instanceof Error)) return false;
+	if (err.name === 'AbortError') return true;
+	if (err instanceof OpenAI.APIError && typeof err.status !== 'number') {
+		const msg = err.message.toLowerCase();
+		return msg.includes('aborted') || msg.includes('abort');
+	}
+	return false;
+}
 
 /**
  * Classify an OpenAI SDK error as a quota/balance-exhausted 429 using the
