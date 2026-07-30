@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.3] - 2026-07-30
+
+### Fixed
+- **Friendly message for cancelled/timed-out requests**: the OpenAI SDK's `APIUserAbortError` is an `APIError` subclass with `status === undefined`, so a cancelled or timed-out request used to surface as `Kimi API: Request was aborted. (HTTP undefined).` Abort-like errors are now detected before the generic `APIError` status branch, and the user sees a clear "request was cancelled or timed out" message instead.
+
 ## [1.9.2] - 2026-07-28
 
 ### Added

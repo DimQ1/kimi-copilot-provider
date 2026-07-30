@@ -3,6 +3,47 @@
 Новейшие записи сверху. Каждый анализ начинается от `<to-sha>` предыдущего.
 Подробности процесса — в агенте `.github/agents/sync-kimi-code.agent.md`.
 
+## Анализ от 2026-07-30
+
+- **Диапазон коммитов:** `f8ec3d1656326eecc2bc2fb6a1163d351bb596cc` .. `d8f455d6942280cce2c8a93795515494d4b9e231` (14 коммитов)
+- **Дата предыдущего анализа:** 2026-07-29
+- **Репозиторий kimi-code:** найден как второй корень multi-root workspace (`e:\Learning\kimi-code`, структура верифицирована: `pnpm-workspace.yaml`, `packages/kosong`, корневой `AGENTS.md`), HEAD `d8f455d6942280cce2c8a93795515494d4b9e231` от 2026-07-30
+- **Свежесть:** fetch выполнен; HEAD == upstream (origin/main): да; локальных незакоммиченных изменений нет
+
+### ✅ Полезные изменения
+—
+
+### 💡 Полезные промпты / инструкции
+| Файл | Что содержит | Почему полезно |
+|---|---|---|
+| `packages/kosong/src/errors.ts` + `packages/agent-core-v2/src/kosong/contract/errors.ts` (коммит `dbb69a267`, откачен `1896d1a13`) | Классификатор `isImageFormatError`: production-фраза Kimi «Unsupported image. Please try another one.» не матчилась паттерном `unsupported image (?:url\|format\|type)`; добавлен standalone-паттерн `/unsupported image(?=\s*(?:[.!?]\|$))/` с lookahead-границей, чтобы «unsupported image size/count» НЕ классифицировались как формат | Провайдер имеет деградацию медиа (`onRequestTooLarge` → `stripImagesToMarkers`), но НЕ распознаёт 400 «Unsupported image.» как детерминированное отклонение изображения: такой запрос падает фатально. Паттерн (с откатом — значит, в kimi-code ещё спорят о форме, но сам production-кейс подтверждён) стоит учесть при реализации image-format fallback в `src/error-handlers.ts` / `src/api-client.ts`. Формулировку и границу lookahead можно взять как есть |
+
+### ❌ Нерелевантные изменения
+| Коммит | Изменение | Почему не применимо |
+|---|---|---|
+| `dbb69a267` + `1896d1a13` | fix(kosong) «Unsupported image.» + его revert | Взаимно гасятся в диапазоне; net-изменения в kosong нет. Учтено выше как идея для промптов/классификатора, а не как код к переносу |
+| `d8f455d69`, `37d9bdc58`-стиль | docs(changelog): синк changelog 0.31.0 (#2404) | Релизная рутина kimi-code |
+| `479403e70`, `0f3b106c4`, `6d0a04648` | apps/vscode: релиз 0.6.6, переформулировка sign-in, доступность sign-in с no-models экрана | Официальное VS Code расширение Kimi — отдельный продукт, не наш провайдер |
+| `ea81c9a3c` | kap-server: `GET /oauth/userinfo` с профилем managed-аккаунта (#2363) | Серверный OAuth-путь; провайдер ходит напрямую в api.kimi.com по sk-ключу |
+| `bc28e9d80` | ci: релиз пакетов 0.31.0 (#2342) | CI-инфраструктура |
+| `d36f4c58f` | agent-core-v2: удаление experimental fault-injection домена (#2399) | Внутренний тестовый механизм движка; у провайдера нет requester-цикла движка |
+| `d10b1c130` | agent-core-v2: cold-miss для кэш-записей read-model без обязательных полей (#2395) | Кэш метаданных сессий сервера; вне контракта chat API |
+| `40172c7ca` | Унификация host identity (`X-Msh-Platform`, `productName`) в OAuth/telemetry/kap-server (#2382) | Заголовки managed-OAuth транспорта; провайдер не использует OAuth device flow. Потенциально интересно, только если захотим идентифицировать провайдер в API через свои X-Msh-* заголовки — решение за пользователем, сейчас не требуется |
+| `691ec4679` | TaskOutput tool: убраны блокирующие block/timeout параметры (v1+v2) (#2379) | Tool-семантика движка агента; в Copilot Chat tool-цикл ведёт VS Code, провайдер лишь транслирует tool definitions |
+| `fa2c5ce18` | Plugin-contributed custom agents (#2365) | Плагинная система CLI, не API |
+| `02d77b20d` | Плагины: `systemPrompt`/`systemPromptPath` в manifest (#2314) | Формирование системного промпта CLI; провайдер передаёт сообщения Copilot как есть |
+
+### ❓ Требует решения пользователя
+| Коммит | Изменение | Вопрос |
+|---|---|---|
+| `dbb69a267` (reverted `1896d1a13`) | Production-фраза Kimi «Unsupported image. Please try another one.» (400) подтверждена как детерминированное отклонение формата изображения | Реализовать ли в провайдере классификатор image-format ошибок (400 с `unsupported image` в теле) с автоматическим fallback — пересылка через `stripImagesToMarkers` по аналогии с onRequestTooLarge? Или ограничиться понятным сообщением пользователю «изображение не поддерживается, удалите вложение»? |
+
+### 📋 План внедрения
+1. (по решению выше) `src/api-client.ts` → добавить `isImageFormatError(err)` (400 + `unsupported image`/`does not represent a valid image`/`could not process image` в теле, с lookahead-границей как в kosong) → при совпадении вызывать деградацию `onRequestTooLarge`-подобным хуком или вернуть дружественное сообщение → риск: ложные срабатывания на иных 400 → проверить unit-тестами в `src/test/provider.test.ts` с мок-телами Kimi.
+2. — (остальные изменения диапазона не требуют внедрения: `packages/kosong` net-код не изменился, контракт chat-completions, SSE, токены и модели не затронуты)
+
+**Следующий анализ начинать с:** `d8f455d6942280cce2c8a93795515494d4b9e231`
+
 ## Анализ от 2026-07-29
 
 - **Диапазон коммитов:** `cdbd33c13c7f5cd4c49ec112ee4313b3938a7752` .. `f8ec3d1656326eecc2bc2fb6a1163d351bb596cc` (13 коммитов)
