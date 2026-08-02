@@ -69,7 +69,6 @@ export async function showUsageQuickPick(
 	switch (selection) {
 		case 'Open details':
 			showUsageDetailsPanel(
-				context,
 				usageTracker,
 				() => vscode.commands.executeCommand('kimi-copilot.refreshQuota'),
 				() => vscode.commands.executeCommand('kimi-copilot.openKimiConsole'),

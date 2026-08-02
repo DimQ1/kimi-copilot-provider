@@ -7,7 +7,6 @@ const PANEL_VIEW_TYPE = 'kimiCopilot.usageDetails';
 let activePanel: vscode.WebviewPanel | undefined;
 
 export function showUsageDetailsPanel(
-	context: vscode.ExtensionContext,
 	usageTracker: UsageTracker,
 	onRefresh?: () => void,
 	onOpenConsole?: () => void,
@@ -18,19 +17,21 @@ export function showUsageDetailsPanel(
 		return;
 	}
 
-	activePanel = vscode.window.createWebviewPanel(
+	const panel = vscode.window.createWebviewPanel(
 		PANEL_VIEW_TYPE,
 		'Kimi Copilot Usage',
 		vscode.ViewColumn.One,
 		{
 			enableScripts: true,
-			retainContextWhenHidden: true,
+			retainContextWhenHidden: false,
 		},
 	);
+	activePanel = panel;
 
-	activePanel.webview.html = renderHtml(usageTracker);
+	panel.webview.html = renderHtml(usageTracker);
 
-	activePanel.webview.onDidReceiveMessage(
+	const panelSubscriptions: vscode.Disposable[] = [];
+	panelSubscriptions.push(panel.webview.onDidReceiveMessage(
 		(message: { command: string }) => {
 			if (message.command === 'refreshQuota') {
 				onRefresh?.();
@@ -38,25 +39,24 @@ export function showUsageDetailsPanel(
 				onOpenConsole?.();
 			}
 		},
-		undefined,
-		context.subscriptions,
-	);
+	));
 
-	activePanel.onDidDispose(
+	panelSubscriptions.push(usageTracker.onDidChange(() => {
+		if (activePanel === panel) {
+			panel.webview.html = renderHtml(usageTracker);
+		}
+	}));
+
+	panel.onDidDispose(
 		() => {
-			activePanel = undefined;
+			for (const subscription of panelSubscriptions) {
+				subscription.dispose();
+			}
+			if (activePanel === panel) {
+				activePanel = undefined;
+			}
 		},
 		undefined,
-		context.subscriptions,
-	);
-
-	// Refresh the panel whenever usage/quota changes.
-	context.subscriptions.push(
-		usageTracker.onDidChange(() => {
-			if (activePanel) {
-				activePanel.webview.html = renderHtml(usageTracker);
-			}
-		}),
 	);
 }
 

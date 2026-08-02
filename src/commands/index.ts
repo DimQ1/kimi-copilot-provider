@@ -11,6 +11,7 @@ import { RefreshQuotaCommand } from './refresh-quota';
 import { OpenKimiConsoleCommand } from './open-kimi-console';
 import { ResetUsageStatsCommand } from './reset-usage-stats';
 import { OpenSettingsCommand } from './open-settings';
+import { ShowDiagnosticsCommand } from './show-diagnostics';
 import type { ConfigurationManager } from '../config';
 import type { KimiChatProvider } from '../provider';
 import type { UsageTracker } from '../usage';
@@ -34,11 +35,12 @@ export function registerAllCommands(
 		new EditModelConfigCommand(configManager, provider),
 		new TestConnectionCommand(configManager, provider),
 		new ShowUsagePopupCommand(context, usageTracker),
-		new ShowUsageStatsCommand(context, usageTracker),
+		new ShowUsageStatsCommand(usageTracker),
 		new RefreshQuotaCommand(configManager, usageTracker, usageClient),
 		new OpenKimiConsoleCommand(),
 		new ResetUsageStatsCommand(usageTracker),
 		new OpenSettingsCommand(),
+		new ShowDiagnosticsCommand(provider),
 	];
 
 	for (const cmd of commands) {

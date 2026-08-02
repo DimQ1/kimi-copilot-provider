@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.7] - 2026-08-02
+
+### Fixed
+- **Bounded catalog and quota parsing**: model and usage response bodies, model metadata, reasoning efforts, and quota rows are now capped before being retained.
+- **Refresh deduplication and disposal**: concurrent model/quota refreshes share one request, and clients, trackers, and webviews release timers, listeners, and abort controllers during shutdown.
+- **Safer usage webview lifecycle**: hidden panels no longer retain their webview context and active panels are cleared on disposal.
+- **Secret storage synchronization**: API-key changes invalidate the server model cache without refreshing on unrelated configuration changes.
+
+## [1.9.6] - 2026-08-02
+
+### Fixed
+- **Streaming lifecycle memory**: request timeout and cancellation listeners now remain active until the response body is fully consumed and are disposed on completion, cancellation, early iterator return, and retry-delay exit.
+- **Streaming usage overcounting**: usage is recorded once from the final stream state instead of once per usage-bearing chunk, preventing inflated request counts, repeated global-state writes, and redundant UI refreshes.
+- **Bounded tool memory**: parallel tool-call arguments now share a 1 MiB aggregate cap; tool count, descriptions, schemas, schema dereference expansion, and the final request body are bounded before dispatch.
+- **Safe malformed tool calls**: invalid or truncated arguments now fail explicitly instead of executing a tool with substituted empty input.
+- **Reduced transient allocations**: Cyrillic transliteration is single-pass, multi-part user messages avoid a discarded concatenated copy, and image Base64 encoding reuses the existing byte buffer.
+- **Non-streaming response guard**: output is capped at 65,536 tokens when streaming is disabled to prevent oversized completions from being buffered in the extension host.
+
+## [1.9.5] - 2026-08-02
+
+### Fixed
+- **Reduced memory usage**: bounded fallback reasoning, streaming tool-call, and image buffers to prevent oversized requests from consuming excessive memory.
+- **Hardened streaming tool calls**: fragmented calls are reassembled by index, response IDs are normalized and deduplicated, and malformed or truncated arguments are surfaced in the output log instead of being silently treated as valid input.
+- **Aligned reasoning effort with the live model catalog**: the picker and request fallback now honor the effort levels returned by `/models`.
+
 ## [1.9.3] - 2026-07-30
 
 ### Fixed

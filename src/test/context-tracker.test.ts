@@ -1,5 +1,5 @@
 import * as assert from 'assert';
-import { SessionContextTracker, estimateRequestBodyBytes, formatBytes, DEFAULT_MAX_BODY_BYTES } from '../context-tracker';
+import { SessionContextTracker, estimateRequestBodyBytes, measureKimiRequestBodyBytes, formatBytes, DEFAULT_MAX_BODY_BYTES } from '../context-tracker';
 
 suite('SessionContextTracker', () => {
 	test('estimates text message tokens', () => {
@@ -187,10 +187,34 @@ suite('SessionContextTracker', () => {
 				warningThreshold: 0.8,
 				errorThreshold: 0.95,
 			});
+
 			const estimate = tracker.estimate([{ role: 'user', content: 'hello' }]);
 			assert.ok(estimate.bodyBytes > 0);
 			assert.ok(estimate.byteRatio >= 0 && estimate.byteRatio <= 1);
 			assert.strictEqual(estimate.status, 'ok');
+		});
+
+		test('exact request measurement includes tool schemas', () => {
+			const withoutTools = measureKimiRequestBodyBytes({
+				model: 'k3',
+				messages: [{ role: 'user', content: 'hello' }],
+				stream: true,
+			});
+			const withTools = measureKimiRequestBodyBytes({
+				model: 'k3',
+				messages: [{ role: 'user', content: 'hello' }],
+				stream: true,
+				tools: [{
+					type: 'function',
+					function: {
+						name: 'large',
+						description: 'x'.repeat(10_000),
+						parameters: { type: 'object' },
+					},
+				}],
+			});
+
+			assert.ok(withTools > withoutTools + 9_000);
 		});
 
 		test('formatBytes renders KiB/MiB', () => {

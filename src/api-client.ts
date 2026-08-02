@@ -53,6 +53,8 @@ export interface ChatResult {
 	traceId: string | null;
 	/** Whether the response is a stream. */
 	isStream: boolean;
+	/** Releases request-scoped timeout and cancellation listeners. Idempotent. */
+	dispose: () => void;
 }
 
 export class KimiApiClient {
@@ -132,6 +134,7 @@ export class KimiApiClient {
 
 		for (let attempt = 1; attempt <= maxAttempts; attempt++) {
 			const { signal, cleanup } = this.createTimeoutSignal(token);
+			let cleanupTransferred = false;
 			try {
 				// withResponse() resolves when headers arrive, before the stream body.
 				const { data, response } = await this.client.chat.completions
@@ -143,12 +146,21 @@ export class KimiApiClient {
 
 				const traceId = parseTraceId(response.headers);
 
-				return {
-					data: data as unknown as
+				const resultData = data as unknown as
 						| OpenAI.Chat.Completions.ChatCompletion
-						| AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
+						| AsyncIterable<OpenAI.Chat.ChatCompletionChunk>;
+				const isStream = activeRequest.stream === true;
+				cleanupTransferred = isStream;
+				return {
+					data: isStream
+						? wrapAsyncIterableWithCleanup(
+							resultData as AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
+							cleanup,
+						)
+						: resultData,
 					traceId,
-					isStream: request.stream === true,
+					isStream,
+					dispose: isStream ? cleanup : () => {},
 				};
 			} catch (err) {
 				lastError = err;
@@ -192,7 +204,9 @@ export class KimiApiClient {
 				const delayMs = this.computeRetryDelay(attempt, retryAfterMs ?? undefined);
 				await this.sleep(delayMs, token);
 			} finally {
-				cleanup();
+				if (!cleanupTransferred) {
+					cleanup();
+				}
 			}
 		}
 		throw this.translateError(lastError);
@@ -203,15 +217,25 @@ export class KimiApiClient {
 	): { signal: AbortSignal; cleanup: () => void } {
 		const controller = new AbortController();
 		const timeout = setTimeout(() => controller.abort(), this.options.timeoutMs);
-		const disposable = token.onCancellationRequested(() => controller.abort());
+		const cancellation = { disposable: undefined as vscode.Disposable | undefined };
+		let cleanedUp = false;
 
 		const cleanup = (): void => {
+			if (cleanedUp) return;
+			cleanedUp = true;
 			clearTimeout(timeout);
-			disposable.dispose();
+			cancellation.disposable?.dispose();
+			controller.signal.removeEventListener('abort', cleanup);
 		};
 
-		// Defense-in-depth: also clean up if the signal itself is aborted.
 		controller.signal.addEventListener('abort', cleanup, { once: true });
+		cancellation.disposable = token.onCancellationRequested(() => controller.abort());
+		if (cleanedUp) {
+			cancellation.disposable.dispose();
+		}
+		if (token.isCancellationRequested) {
+			controller.abort();
+		}
 
 		return { signal: controller.signal, cleanup };
 	}
@@ -332,16 +356,42 @@ export class KimiApiClient {
 
 	private sleep(ms: number, token: vscode.CancellationToken): Promise<void> {
 		return new Promise((resolve) => {
-			const timer = setTimeout(() => {
-				disposable.dispose();
-				resolve();
-			}, ms);
-			const disposable = token.onCancellationRequested(() => {
+			let settled = false;
+			const cancellation = { disposable: undefined as vscode.Disposable | undefined };
+			const finish = (): void => {
+				if (settled) return;
+				settled = true;
 				clearTimeout(timer);
+				cancellation.disposable?.dispose();
 				resolve();
-			});
+			};
+			const timer = setTimeout(finish, ms);
+			cancellation.disposable = token.onCancellationRequested(finish);
+			if (settled) {
+				cancellation.disposable.dispose();
+			}
+			if (token.isCancellationRequested) {
+				finish();
+			}
 		});
 	}
+}
+
+export function wrapAsyncIterableWithCleanup<T>(
+	source: AsyncIterable<T>,
+	cleanup: () => void,
+): AsyncIterable<T> {
+	return {
+		async *[Symbol.asyncIterator](): AsyncIterator<T> {
+			try {
+				for await (const item of source) {
+					yield item;
+				}
+			} finally {
+				cleanup();
+			}
+		},
+	};
 }
 
 // ═══════════════════════════════════════════════════════════════════════

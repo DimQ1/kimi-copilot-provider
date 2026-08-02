@@ -33,7 +33,7 @@ const DEFAULT_STATS: UsageStats = {
 	cachedTokens: 0,
 };
 
-export class UsageTracker {
+export class UsageTracker implements vscode.Disposable {
 	private stats: UsageStats;
 	private quota: KimiManagedUsage | null;
 	private quotaError: string | null;
@@ -185,6 +185,10 @@ export class UsageTracker {
 			return `${(value / 1000).toFixed(1)}k`;
 		}
 		return `${(value / 1_000_000).toFixed(2)}M`;
+	}
+
+	dispose(): void {
+		this._onDidChange.dispose();
 	}
 }
 

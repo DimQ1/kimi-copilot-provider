@@ -1,6 +1,8 @@
 import * as assert from 'assert';
 import {
 	KimiUsageClient,
+	MAX_USAGE_LIMITS,
+	MAX_USAGE_RESPONSE_BYTES,
 	parseManagedUsagePayload,
 	formatResetTime,
 	formatDuration,
@@ -68,6 +70,18 @@ suite('parseManagedUsagePayload', () => {
 		const parsed = parseManagedUsagePayload(null);
 		assert.strictEqual(parsed.summary, null);
 		assert.deepStrictEqual(parsed.limits, []);
+	});
+
+	test('bounds retained quota rows and labels', () => {
+		const parsed = parseManagedUsagePayload({
+			limits: Array.from({ length: MAX_USAGE_LIMITS + 10 }, (_, index) => ({
+				name: 'x'.repeat(1000),
+				limit: 100,
+				used: index,
+			})),
+		});
+		assert.strictEqual(parsed.limits.length, MAX_USAGE_LIMITS);
+		assert.strictEqual(parsed.limits[0]!.label.length, 256);
 	});
 });
 
@@ -145,6 +159,36 @@ suite('KimiUsageClient', () => {
 				assert.ok(result.message.includes('unauthorized'));
 				assert.strictEqual(result.status, 401);
 			}
+		});
+	});
+
+	test('fetchUsage rejects an oversized response body', async () => {
+		await withFetchStub(
+			async () => new Response('x'.repeat(MAX_USAGE_RESPONSE_BYTES + 1)),
+			async () => {
+				const client = new KimiUsageClient();
+				const result = await client.fetchUsage('sk-test');
+				assert.strictEqual(result.kind, 'error');
+				if (result.kind === 'error') {
+					assert.ok(result.message.includes('exceeded'));
+				}
+			},
+		);
+	});
+
+	test('deduplicates concurrent quota refreshes', async () => {
+		let calls = 0;
+		await withFetchStub(async () => {
+			calls++;
+			await new Promise((resolve) => setTimeout(resolve, 10));
+			return new Response(JSON.stringify({ usage: { limit: 100, used: 10 } }));
+		}, async () => {
+			const client = new KimiUsageClient();
+			await Promise.all([
+				client.fetchUsage('sk-test'),
+				client.fetchUsage('sk-test'),
+			]);
+			assert.strictEqual(calls, 1);
 		});
 	});
 });

@@ -5,6 +5,7 @@ import { KimiChatProvider } from './provider';
 import { UsageTracker } from './usage';
 import { KimiUsageClient } from './usage-client';
 import { registerAllCommands } from './commands';
+import { disposeUsageDetailsPanel } from './usage-webview';
 
 const QUOTA_REFRESH_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
 const QUOTA_WARNING_THRESHOLD = 0.8;
@@ -25,6 +26,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     context.subscriptions.push(
         vscode.lm.registerLanguageModelChatProvider('kimi-copilot', provider),
         provider,
+        usageTracker,
+        usageClient,
+        new vscode.Disposable(disposeUsageDetailsPanel),
     );
 
     const statusBar = vscode.window.createStatusBarItem(
@@ -92,11 +96,7 @@ function startQuotaRefresh(
 
     // Also refresh when the API key changes.
     context.subscriptions.push(
-        vscode.workspace.onDidChangeConfiguration(async (event) => {
-            if (event.affectsConfiguration('kimiCopilot')) {
-                void refresh();
-            }
-        }),
+        configManager.onDidChangeApiKey(() => void refresh()),
     );
 }
 

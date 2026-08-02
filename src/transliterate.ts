@@ -15,7 +15,6 @@ import type { KimiMessage } from './types';
 // "transliterate": true } }.
 // ═══════════════════════════════════════════════════════════════════════
 
-/** Multi-character mappings are applied before single-character ones. */
 const DIGRAPHS: ReadonlyArray<readonly [string, string]> = [
 	['ё', 'yo'], ['Ё', 'Yo'],
 	['ж', 'zh'], ['Ж', 'Zh'],
@@ -56,20 +55,18 @@ const SINGLE: ReadonlyArray<readonly [string, string]> = [
 ];
 
 const ALL_MAPPINGS: ReadonlyArray<readonly [string, string]> = [...DIGRAPHS, ...SINGLE];
+const TRANSLITERATION_MAP = new Map<string, string>(ALL_MAPPINGS);
 
 /** Matches any Cyrillic character — fast pre-check to skip pure-ASCII text. */
 const CYRILLIC_RE = /[Ѐ-ӿ]/;
+const CYRILLIC_GLOBAL_RE = /[Ѐ-ӿ]/g;
 
 /** Transliterates Cyrillic characters in `text` to Latin (GOST-style). */
 export function transliterateCyrillic(text: string): string {
 	if (!CYRILLIC_RE.test(text)) {
 		return text;
 	}
-	let result = text;
-	for (const [from, to] of ALL_MAPPINGS) {
-		result = result.split(from).join(to);
-	}
-	return result;
+	return text.replace(CYRILLIC_GLOBAL_RE, (character) => TRANSLITERATION_MAP.get(character) ?? character);
 }
 
 /**

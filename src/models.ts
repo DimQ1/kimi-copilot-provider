@@ -174,7 +174,9 @@ export function toChatInfo(
 	const maxOutputTokens = overrides?.maxOutputTokens ?? m.maxOutputTokens;
 
 	const supportsReasoningEffort = m.capabilities.thinking && m.defaults?.reasoningEffort !== undefined;
-	const reasoningLevels: string[] = supportsReasoningEffort ? ['low', 'high', 'max'] : [];
+	const reasoningLevels: string[] = supportsReasoningEffort
+		? [...(m.reasoningEfforts ?? ['low', 'high', 'max'])]
+		: [];
 
 	const info: ModelPickerChatInformation = {
 		id: m.id,

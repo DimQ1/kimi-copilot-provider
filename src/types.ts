@@ -215,6 +215,8 @@ export interface ModelDefinition {
 	 * because the API would reject it.
 	 */
 	supportsThinkingType?: 'only' | 'no' | 'both';
+	/** Server-declared K3 reasoning effort values accepted by this model. */
+	reasoningEfforts?: readonly ('low' | 'high' | 'max')[];
 }
 
 // ---- Server model catalog types (GET /models) ----

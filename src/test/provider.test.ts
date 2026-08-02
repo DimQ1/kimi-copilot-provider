@@ -1,11 +1,12 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
-import { buildKimiRequest, convertMessages, convertTools, extractTextContent, resolveReasoningEffort, formatThinkingAsText, tryReportThinkingPart, parseRetryAfterHeader, computeBackoffDelayMs, stripImagesToMarkers, isSupportedImageMimeType } from '../provider';
+import { buildKimiRequest, convertMessages, convertTools, extractTextContent, resolveReasoningEffort, resolveReasoningEffortFromOptions, formatThinkingAsText, tryReportThinkingPart, parseRetryAfterHeader, computeBackoffDelayMs, stripImagesToMarkers, isSupportedImageMimeType, MAX_IMAGE_PAYLOAD_BYTES, MAX_REQUEST_TOOLS, MAX_STREAM_TOOL_ARGUMENT_CHARS, MAX_STREAM_TOOL_ARGUMENT_TOTAL_CHARS, MAX_STREAM_TOOL_CALLS, MAX_TOOL_DESCRIPTION_CHARS, StreamingToolCallAccumulator, StreamingUsageAccumulator, parseToolCallArguments } from '../provider';
 import type { KimiRequest } from '../types';
 import { MODELS, toChatInfo } from '../models';
-import { applyServerModels } from '../models-client';
+import { applyServerModels, MAX_SERVER_MODELS, sanitizeServerModels } from '../models-client';
 import { isQuotaExhaustedError, createErrorChain } from '../error-handlers';
 import type { KimiTool } from '../types';
+import { ReasoningKeyDialect } from '../reasoning-key';
 
 suite('provider helpers', () => {
     suite('Kimi K3 model', () => {
@@ -179,6 +180,18 @@ suite('provider helpers', () => {
             assert.throws(() => convertMessages(messages), /Unsupported image format/);
         });
 
+        test('rejects oversized image payloads before base64 encoding', () => {
+            const messages = [
+                vscode.LanguageModelChatMessage.User([
+                    new vscode.LanguageModelDataPart(
+                        new Uint8Array(MAX_IMAGE_PAYLOAD_BYTES + 1),
+                        'image/png',
+                    ),
+                ]),
+            ];
+            assert.throws(() => convertMessages(messages), /Image attachments are too large/);
+        });
+
         test('drops vacuous assistant messages with no content and no tool calls', () => {
             const messages = [
                 vscode.LanguageModelChatMessage.User('hello'),
@@ -271,6 +284,142 @@ suite('provider helpers', () => {
                 },
             ];
             assert.deepStrictEqual(result, expected);
+        });
+
+        test('rejects an unbounded number of tool definitions', () => {
+            const tools = Array.from({ length: MAX_REQUEST_TOOLS + 1 }, (_, index) => ({
+                name: `tool${index}`,
+                description: 'tool',
+                inputSchema: { type: 'object' },
+            })) as vscode.LanguageModelChatTool[];
+
+            assert.throws(() => convertTools(true, tools), /Too many tools/);
+        });
+
+        test('rejects oversized tool descriptions before request construction', () => {
+            const tools = [{
+                name: 'oversized',
+                description: 'x'.repeat(MAX_TOOL_DESCRIPTION_CHARS + 1),
+                inputSchema: { type: 'object' },
+            }] as vscode.LanguageModelChatTool[];
+
+            assert.throws(() => convertTools(true, tools), /Description.*exceeds/);
+        });
+
+        test('rejects schemas whose local references expand beyond the memory budget', () => {
+            const defs: Record<string, unknown> = {
+                leaf: { type: 'string', description: 'value' },
+            };
+            for (let level = 0; level < 16; level++) {
+                const child = level === 0 ? 'leaf' : `level${level - 1}`;
+                defs[`level${level}`] = {
+                    type: 'object',
+                    properties: {
+                        left: { $ref: `#/$defs/${child}` },
+                        right: { $ref: `#/$defs/${child}` },
+                    },
+                };
+            }
+            const tools = [{
+                name: 'expanding',
+                description: 'expanding schema',
+                inputSchema: {
+                    type: 'object',
+                    $defs: defs,
+                    properties: { root: { $ref: '#/$defs/level15' } },
+                },
+            }] as vscode.LanguageModelChatTool[];
+
+            assert.throws(() => convertTools(true, tools), /schema is too large/i);
+        });
+    });
+
+    suite('streaming tool-call accumulator', () => {
+        test('reassembles fragmented calls by index and preserves JSON arguments', () => {
+            const accumulator = new StreamingToolCallAccumulator();
+            accumulator.append({ index: 1, id: 'call:1', function: { name: 'get', arguments: '{"city"' } });
+            accumulator.append({ index: 1, function: { name: 'Weather', arguments: ':"Paris"}' } });
+
+            assert.deepStrictEqual(accumulator.drain(), [{
+                id: 'call_1',
+                name: 'getWeather',
+                args: '{"city":"Paris"}',
+                truncated: false,
+            }]);
+            assert.strictEqual(accumulator.size, 0);
+        });
+
+        test('normalizes duplicate and unsafe response IDs without breaking uniqueness', () => {
+            const accumulator = new StreamingToolCallAccumulator();
+            accumulator.append({ index: 0, id: 'same/id', function: { name: 'first', arguments: '{}' } });
+            accumulator.append({ index: 1, id: 'same/id', function: { name: 'second', arguments: '{}' } });
+
+            const calls = accumulator.drain();
+            assert.deepStrictEqual(calls.map((call) => call.id), ['same_id', 'same_id_2']);
+        });
+
+        test('bounds call count and argument memory', () => {
+            const accumulator = new StreamingToolCallAccumulator();
+            for (let index = 0; index < MAX_STREAM_TOOL_CALLS + 1; index++) {
+                accumulator.append({ index, id: `call-${index}`, function: { name: 'tool', arguments: '{}' } });
+            }
+            accumulator.append({
+                index: 0,
+                function: { arguments: 'x'.repeat(MAX_STREAM_TOOL_ARGUMENT_CHARS + 1) },
+            });
+
+            const calls = accumulator.drain();
+            assert.strictEqual(calls.length, MAX_STREAM_TOOL_CALLS);
+            assert.strictEqual(calls[0].args.length, MAX_STREAM_TOOL_ARGUMENT_CHARS);
+            assert.strictEqual(calls[0].truncated, true);
+        });
+
+        test('bounds aggregate argument memory across parallel calls', () => {
+            const accumulator = new StreamingToolCallAccumulator();
+            const callCount = Math.ceil(MAX_STREAM_TOOL_ARGUMENT_TOTAL_CHARS / MAX_STREAM_TOOL_ARGUMENT_CHARS) + 1;
+            for (let index = 0; index < callCount; index++) {
+                accumulator.append({
+                    index,
+                    id: `call-${index}`,
+                    function: {
+                        name: 'tool',
+                        arguments: 'x'.repeat(MAX_STREAM_TOOL_ARGUMENT_CHARS),
+                    },
+                });
+            }
+
+            const calls = accumulator.drain();
+            assert.strictEqual(
+                calls.reduce((total, call) => total + call.args.length, 0),
+                MAX_STREAM_TOOL_ARGUMENT_TOTAL_CHARS,
+            );
+            assert.strictEqual(calls.at(-1)?.truncated, true);
+        });
+
+        test('rejects malformed and non-object argument payloads explicitly', () => {
+            assert.deepStrictEqual(parseToolCallArguments('{"ok":true}'), {
+                input: { ok: true },
+                valid: true,
+            });
+
+            suite('streaming usage accumulator', () => {
+                test('keeps only the latest usage and drains it once', () => {
+                    const accumulator = new StreamingUsageAccumulator();
+                    accumulator.observe({ usage: { prompt_tokens: 10, completion_tokens: 1, total_tokens: 11 } });
+                    accumulator.observe({ usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 } });
+
+                    assert.deepStrictEqual(accumulator.drain(), {
+                        prompt_tokens: 10,
+                        completion_tokens: 2,
+                        total_tokens: 12,
+                        cached_tokens: undefined,
+                    });
+                    assert.strictEqual(accumulator.drain(), null);
+                });
+            });
+            assert.strictEqual(parseToolCallArguments('{"ok":').valid, false);
+            assert.match(parseToolCallArguments('{"ok":').reason ?? '', /Unexpected|end/i);
+            assert.strictEqual(parseToolCallArguments('[]').valid, false);
         });
     });
 
@@ -386,6 +535,22 @@ suite('provider helpers', () => {
     });
 
     suite('applyServerModels context limits', () => {
+        test('cached server catalogs are bounded and sanitized', () => {
+            const sanitized = sanitizeServerModels(Array.from(
+                { length: MAX_SERVER_MODELS + 10 },
+                (_, index) => ({
+                    id: `model-${String(index)}${'x'.repeat(400)}`,
+                    contextLength: 1024,
+                    supportsReasoning: false,
+                    supportsImageIn: false,
+                    supportsVideoIn: false,
+                    supportsToolUse: true,
+                }),
+            ));
+            assert.strictEqual(sanitized.length, MAX_SERVER_MODELS);
+            assert.strictEqual(sanitized[0]!.id.length, 256);
+        });
+
         test('server context_length becomes the source of truth', () => {
             const merged = applyServerModels(MODELS, [
                 {
@@ -481,6 +646,44 @@ suite('provider helpers', () => {
             assert.ok(k3);
             // 'max' is not in valid_efforts → keep the hard-coded default.
             assert.strictEqual(k3.defaults?.reasoningEffort, 'max');
+        });
+
+        test('server effort levels constrain picker and request fallback', () => {
+            const merged = applyServerModels(MODELS, [
+                {
+                    id: 'k3',
+                    contextLength: 1048576,
+                    supportsReasoning: true,
+                    supportsImageIn: true,
+                    supportsVideoIn: true,
+                    supportsToolUse: true,
+                    supportEfforts: ['low', 'high'],
+                    defaultEffort: 'high',
+                },
+            ]);
+            const k3 = merged.find((m) => m.id === 'kimi-k3');
+            assert.ok(k3);
+            const info = toChatInfo(k3, true);
+            const schema = (info as unknown as { configurationSchema?: { properties?: { reasoningEffort?: { enum: string[] } } } }).configurationSchema;
+            assert.deepStrictEqual(schema?.properties?.reasoningEffort?.enum, ['low', 'high']);
+            assert.strictEqual(
+                resolveReasoningEffortFromOptions(
+                    { modelOptions: { reasoning_effort: 'max' } } as unknown as vscode.ProvideLanguageModelChatResponseOptions,
+                    k3.defaults,
+                    {},
+                    k3.reasoningEfforts,
+                ),
+                'low',
+            );
+        });
+    });
+
+    suite('reasoning key dialect', () => {
+        test('learns the response key for outbound continuation', () => {
+            const dialect = new ReasoningKeyDialect();
+            assert.strictEqual(dialect.outboundKey(), 'reasoning_content');
+            assert.strictEqual(dialect.observe({ reasoning_details: 'step' }), 'step');
+            assert.strictEqual(dialect.outboundKey(), 'reasoning_details');
         });
     });
 

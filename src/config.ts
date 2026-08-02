@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import type { ModelConfigOverride, KimiServerModelInfo } from './types';
+import { sanitizeServerModels } from './models-client';
 
 // ═══════════════════════════════════════════════════════════════════════
 // Configuration helpers — read extension settings at runtime.
@@ -26,12 +27,13 @@ export class ConfigurationManager {
 
 	/** Cached server model catalog (undefined when never fetched). */
 	getServerModels(): KimiServerModelInfo[] | undefined {
-		return this.globalState?.get<KimiServerModelInfo[]>(MODELS_CACHE_KEY);
+		const models = this.globalState?.get<KimiServerModelInfo[]>(MODELS_CACHE_KEY);
+		return Array.isArray(models) ? sanitizeServerModels(models) : undefined;
 	}
 
 	/** Persists the server model catalog across restarts. */
 	async setServerModels(models: KimiServerModelInfo[]): Promise<void> {
-		await this.globalState?.update(MODELS_CACHE_KEY, models);
+		await this.globalState?.update(MODELS_CACHE_KEY, sanitizeServerModels(models));
 	}
 
 	/** Removes the cached server model catalog (e.g. when the key is cleared). */
@@ -263,5 +265,16 @@ export class ConfigurationManager {
 				callback();
 			}
 		});
+	}
+
+	onDidChangeApiKey(callback: () => void): vscode.Disposable {
+		return vscode.Disposable.from(
+			this.secretStorage.onDidChange((event) => {
+				if (event.key === API_KEY_SECRET_KEY) callback();
+			}),
+			vscode.workspace.onDidChangeConfiguration((event) => {
+				if (event.affectsConfiguration(`${CONFIG_SECTION}.apiKey`)) callback();
+			}),
+		);
 	}
 }

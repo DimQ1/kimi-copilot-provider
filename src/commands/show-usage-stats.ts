@@ -11,7 +11,6 @@ export class ShowUsageStatsCommand extends BaseCommand {
 	readonly id = 'kimi-copilot.showUsageStats';
 
 	constructor(
-		private readonly context: vscode.ExtensionContext,
 		private readonly usageTracker: UsageTracker,
 	) {
 		super();
@@ -19,7 +18,6 @@ export class ShowUsageStatsCommand extends BaseCommand {
 
 	execute(): void {
 		showUsageDetailsPanel(
-			this.context,
 			this.usageTracker,
 			() => vscode.commands.executeCommand('kimi-copilot.refreshQuota'),
 			() => vscode.commands.executeCommand('kimi-copilot.openKimiConsole'),

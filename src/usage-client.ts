@@ -1,4 +1,5 @@
 import type { KimiManagedUsage, KimiManagedUsageResult, KimiUsageRow, KimiBoosterWallet } from './types';
+import { readBoundedResponseText, ResponseBodyTooLargeError } from './response-body';
 
 // ═══════════════════════════════════════════════════════════════════════
 // Kimi Code managed usage client
@@ -18,6 +19,16 @@ import type { KimiManagedUsage, KimiManagedUsageResult, KimiUsageRow, KimiBooste
 export const DEFAULT_USAGE_ENDPOINT = 'https://api.kimi.com/coding/v1/usages';
 
 const FIXED_POINT_CENTS = 1_000_000;
+export const MAX_USAGE_RESPONSE_BYTES = 256 * 1024;
+export const MAX_USAGE_LIMITS = 64;
+const MAX_USAGE_METADATA_CHARS = 256;
+const MAX_USAGE_ERROR_CHARS = 1024;
+
+function boundedText(value: unknown, fallback = ''): string {
+	return typeof value === 'string'
+		? value.slice(0, MAX_USAGE_METADATA_CHARS)
+		: fallback;
+}
 
 function fixedPointToCents(value: number): number {
 	const cents = value / FIXED_POINT_CENTS;
@@ -44,7 +55,7 @@ function parseMoney(raw: unknown): { cents: number; currency: string } | null {
 	if (!isRecord(raw)) return null;
 	const cents = toInt(raw['priceInCents']);
 	if (cents === null) return null;
-	const currency = typeof raw['currency'] === 'string' ? raw['currency'] : '';
+	const currency = boundedText(raw['currency']);
 	return { cents, currency };
 }
 
@@ -86,7 +97,7 @@ function resetHintFrom(raw: Record<string, unknown>): string | undefined {
 	for (const key of ['reset_at', 'resetAt', 'reset_time', 'resetTime']) {
 		const v = raw[key];
 		if (typeof v === 'string' && v.length > 0) {
-			return formatResetTime(v);
+			return formatResetTime(v.slice(0, MAX_USAGE_METADATA_CHARS));
 		}
 	}
 	for (const key of ['reset_in', 'resetIn', 'ttl', 'window']) {
@@ -136,7 +147,7 @@ function limitLabel(
 ): string {
 	for (const key of ['name', 'title', 'scope']) {
 		const v = item[key] ?? detail[key];
-		if (typeof v === 'string' && v.length > 0) return v;
+		if (typeof v === 'string' && v.length > 0) return v.slice(0, MAX_USAGE_METADATA_CHARS);
 	}
 	const duration = toInt(window['duration'] ?? item['duration'] ?? detail['duration']);
 	const rawUnit = window['timeUnit'] ?? item['timeUnit'] ?? detail['timeUnit'];
@@ -166,10 +177,10 @@ function toUsageRow(raw: unknown, defaultLabel: string): KimiUsageRow | null {
 	if (used === null && limit === null) return null;
 	const name =
 		typeof raw['name'] === 'string'
-			? raw['name']
+			? raw['name'].slice(0, MAX_USAGE_METADATA_CHARS)
 			: typeof raw['title'] === 'string'
-				? raw['title']
-				: defaultLabel;
+				? raw['title'].slice(0, MAX_USAGE_METADATA_CHARS)
+				: defaultLabel.slice(0, MAX_USAGE_METADATA_CHARS);
 	return {
 		label: name,
 		used: used ?? 0,
@@ -186,7 +197,7 @@ export function parseManagedUsagePayload(payload: unknown): KimiManagedUsage {
 	const limits: KimiUsageRow[] = [];
 	const rawLimits = payload['limits'];
 	if (Array.isArray(rawLimits)) {
-		for (let idx = 0; idx < rawLimits.length; idx++) {
+		for (let idx = 0; idx < Math.min(rawLimits.length, MAX_USAGE_LIMITS); idx++) {
 			const item = rawLimits[idx];
 			if (!isRecord(item)) continue;
 			const detailRaw = item['detail'];
@@ -207,11 +218,31 @@ export interface UsageClientOptions {
 }
 
 export class KimiUsageClient {
+	private inFlight: Promise<KimiManagedUsageResult> | undefined;
+	private activeController: AbortController | undefined;
+
 	constructor(private readonly options: UsageClientOptions = {}) {}
 
 	async fetchUsage(accessToken: string): Promise<KimiManagedUsageResult> {
+		if (this.inFlight) return this.inFlight;
+		const request = this.fetchUsageOnce(accessToken);
+		this.inFlight = request;
+		try {
+			return await request;
+		} finally {
+			if (this.inFlight === request) this.inFlight = undefined;
+		}
+	}
+
+	dispose(): void {
+		this.activeController?.abort();
+		this.activeController = undefined;
+	}
+
+	private async fetchUsageOnce(accessToken: string): Promise<KimiManagedUsageResult> {
 		const endpoint = this.options.endpoint ?? DEFAULT_USAGE_ENDPOINT;
 		const controller = new AbortController();
+		this.activeController = controller;
 		const timer = setTimeout(() => controller.abort(), this.options.timeoutMs ?? 8000);
 		try {
 			const res = await fetch(endpoint, {
@@ -221,6 +252,7 @@ export class KimiUsageClient {
 				},
 				signal: controller.signal,
 			});
+			const body = await readBoundedResponseText(res, MAX_USAGE_RESPONSE_BYTES);
 			if (!res.ok) {
 				const status = res.status;
 				let message: string;
@@ -231,20 +263,32 @@ export class KimiUsageClient {
 				} else {
 					message = `Failed to fetch Kimi usage: HTTP ${String(status)}`;
 				}
-				const body = await res.text().catch(() => '');
 				if (body) {
 					try {
 						const json = JSON.parse(body) as { error?: { message?: string } };
-						if (json.error?.message) message = json.error.message;
+						if (json.error?.message) {
+							message = json.error.message.slice(0, MAX_USAGE_ERROR_CHARS);
+						}
 					} catch {
 						// ignore
 					}
 				}
 				return { kind: 'error', status, message };
 			}
-			const json: unknown = await res.json();
+			let json: unknown;
+			try {
+				json = JSON.parse(body);
+			} catch {
+				return { kind: 'error', message: 'Kimi usage endpoint returned invalid JSON.' };
+			}
 			return { kind: 'ok', usage: parseManagedUsagePayload(json) };
 		} catch (error) {
+			if (error instanceof ResponseBodyTooLargeError) {
+				return {
+					kind: 'error',
+					message: `Kimi usage response exceeded ${String(MAX_USAGE_RESPONSE_BYTES)} bytes.`,
+				};
+			}
 			if (error instanceof Error && error.name === 'AbortError') {
 				return { kind: 'error', message: 'Failed to fetch Kimi usage: request timed out.' };
 			}
@@ -252,6 +296,7 @@ export class KimiUsageClient {
 			return { kind: 'error', message: `Failed to fetch Kimi usage: ${msg}` };
 		} finally {
 			clearTimeout(timer);
+			if (this.activeController === controller) this.activeController = undefined;
 		}
 	}
 }

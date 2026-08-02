@@ -2,7 +2,7 @@
   "name": "kimi-copilot-provider",
   "displayName": "Kimi Copilot Provider",
   "description": "Use Kimi K3 and K2.x models in GitHub Copilot Chat — Thinking/reasoning display, vision, tool calling, zero config. 🎁 New to Kimi? Subscribe via referral and we both get up to 1-Year Membership Credits: https://kimi-bot.com/activities/viral-referral/share?scenario=subscribe&from=share_poster&invitation_code=ZKH245",
-  "version": "1.9.3",
+  "version": "1.9.7",
   "publisher": "kimi-ext",
   "license": "MIT",
   "icon": "icon.png",
@@ -86,6 +86,11 @@
         "category": "Kimi Copilot"
       },
       {
+        "command": "kimi-copilot.showDiagnostics",
+        "title": "Show Diagnostics",
+        "category": "Kimi Copilot"
+      },
+      {
         "command": "kimi-copilot.openSettings",
         "title": "Open Settings",
         "category": "Kimi Copilot"
@@ -136,6 +141,7 @@
               "maxOutputTokens": {
                 "type": "number",
                 "minimum": 1,
+                "maximum": 1048576,
                 "description": "Max output tokens for this model."
               },
               "temperature": {

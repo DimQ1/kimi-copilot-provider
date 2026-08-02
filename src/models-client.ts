@@ -1,4 +1,5 @@
 import type { KimiServerModelInfo, ModelDefinition } from './types';
+import { readBoundedResponseText, ResponseBodyTooLargeError } from './response-body';
 
 // ═══════════════════════════════════════════════════════════════════════
 // Kimi Code managed /models client
@@ -20,13 +21,26 @@ export type KimiModelsFetchResult =
 	| { kind: 'ok'; models: readonly KimiServerModelInfo[] }
 	| { kind: 'error'; status?: number; message: string };
 
+export const MAX_MODELS_RESPONSE_BYTES = 512 * 1024;
+export const MAX_SERVER_MODELS = 128;
+const MAX_MODEL_METADATA_CHARS = 256;
+const MAX_MODEL_EFFORTS = 16;
+
+function boundedString(value: unknown): string | undefined {
+	if (typeof value !== 'string' || value.length === 0) return undefined;
+	return value.slice(0, MAX_MODEL_METADATA_CHARS);
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function parseStringArray(value: unknown): readonly string[] | undefined {
 	if (!Array.isArray(value)) return undefined;
-	const out = value.filter((v): v is string => typeof v === 'string' && v.length > 0);
+	const out = value
+		.slice(0, MAX_MODEL_EFFORTS)
+		.map(boundedString)
+		.filter((v): v is string => v !== undefined);
 	return out.length > 0 ? out : undefined;
 }
 
@@ -47,18 +61,20 @@ function parseThinkEfforts(value: unknown): {
 }
 
 function toModelInfo(item: unknown): KimiServerModelInfo | undefined {
-	if (!isRecord(item) || typeof item['id'] !== 'string' || item['id'].length === 0) {
+	if (!isRecord(item)) {
 		return undefined;
 	}
+	const id = boundedString(item['id']);
+	if (!id) return undefined;
 	const contextLength = Number(item['context_length']);
 	if (!Number.isInteger(contextLength) || contextLength <= 0) {
 		return undefined;
 	}
-	const displayName = item['display_name'];
+	const displayName = boundedString(item['display_name']);
 	const thinkEfforts = parseThinkEfforts(item['think_efforts']);
 	const thinkingType = item['supports_thinking_type'];
 	return {
-		id: item['id'],
+		id,
 		contextLength,
 		supportsReasoning: Boolean(item['supports_reasoning']),
 		supportsImageIn: Boolean(item['supports_image_in']),
@@ -66,8 +82,7 @@ function toModelInfo(item: unknown): KimiServerModelInfo | undefined {
 		supportsToolUse: Object.hasOwn(item, 'supports_tool_use')
 			? Boolean(item['supports_tool_use'])
 			: true,
-		displayName:
-			typeof displayName === 'string' && displayName.length > 0 ? displayName : undefined,
+		displayName,
 		supportsThinkingType:
 			thinkingType === 'only' || thinkingType === 'no' || thinkingType === 'both'
 				? thinkingType
@@ -75,6 +90,31 @@ function toModelInfo(item: unknown): KimiServerModelInfo | undefined {
 		supportEfforts: thinkEfforts.supportEfforts ? [...thinkEfforts.supportEfforts] : undefined,
 		defaultEffort: thinkEfforts.defaultEffort,
 	};
+}
+
+export function sanitizeServerModels(
+	models: readonly KimiServerModelInfo[],
+): KimiServerModelInfo[] {
+	const sanitized: KimiServerModelInfo[] = [];
+	for (const model of models.slice(0, MAX_SERVER_MODELS)) {
+		const parsed = toModelInfo({
+			id: model.id,
+			context_length: model.contextLength,
+			supports_reasoning: model.supportsReasoning,
+			supports_image_in: model.supportsImageIn,
+			supports_video_in: model.supportsVideoIn,
+			supports_tool_use: model.supportsToolUse,
+			display_name: model.displayName,
+			supports_thinking_type: model.supportsThinkingType,
+			think_efforts: {
+				support: Boolean(model.supportEfforts?.length),
+				valid_efforts: model.supportEfforts,
+				default_effort: model.defaultEffort,
+			},
+		});
+		if (parsed) sanitized.push(parsed);
+	}
+	return sanitized;
 }
 
 /**
@@ -97,19 +137,25 @@ export async function fetchKimiModels(
 			},
 			signal: controller.signal,
 		});
+		const text = await readBoundedResponseText(response, MAX_MODELS_RESPONSE_BYTES);
 		if (!response.ok) {
-			const text = await response.text().catch(() => '');
 			return {
 				kind: 'error',
 				status: response.status,
 				message: `GET /models failed (HTTP ${response.status})${text ? `: ${text.slice(0, 200)}` : ''}`,
 			};
 		}
-		const payload: unknown = await response.json();
+		let payload: unknown;
+		try {
+			payload = JSON.parse(text);
+		} catch {
+			return { kind: 'error', message: 'The /models response was not valid JSON.' };
+		}
 		if (!isRecord(payload) || !Array.isArray(payload['data'])) {
 			return { kind: 'error', message: 'Unexpected /models response shape.' };
 		}
 		const models = payload['data']
+			.slice(0, MAX_SERVER_MODELS)
 			.map(toModelInfo)
 			.filter((m): m is KimiServerModelInfo => m !== undefined);
 		if (models.length === 0) {
@@ -118,7 +164,9 @@ export async function fetchKimiModels(
 		return { kind: 'ok', models };
 	} catch (error) {
 		const message =
-			controller.signal.aborted
+			error instanceof ResponseBodyTooLargeError
+				? `GET /models response exceeded ${String(MAX_MODELS_RESPONSE_BYTES)} bytes`
+				: controller.signal.aborted
 				? `GET /models timed out after ${timeoutMs}ms`
 				: error instanceof Error
 					? error.message
@@ -206,6 +254,13 @@ export function applyServerModels(
 		};
 		if (server.supportsThinkingType !== undefined) {
 			next.supportsThinkingType = server.supportsThinkingType;
+		}
+		const reasoningEfforts = server.supportEfforts?.filter(
+			(effort): effort is 'low' | 'high' | 'max' =>
+				effort === 'low' || effort === 'high' || effort === 'max',
+		);
+		if (reasoningEfforts && reasoningEfforts.length > 0) {
+			next.reasoningEfforts = [...reasoningEfforts];
 		}
 
 		// Reasoning effort levels (only when the server declares them). The

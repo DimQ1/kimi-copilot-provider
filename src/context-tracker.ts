@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import type { KimiMessage } from './types';
+import type { KimiMessage, KimiRequest } from './types';
 
 // ═══════════════════════════════════════════════════════════════════════
 // Session context tracker — estimates the size of the current conversation
@@ -223,6 +223,7 @@ export function estimateRequestBodyBytes(messages: KimiMessage[]): number {
 					// data: URL — base64 payload, ~4/3 of the raw image bytes.
 					bytes += Buffer.byteLength(part.image_url.url, 'utf8');
 				}
+
 			}
 		}
 		if (message.tool_calls) {
@@ -233,6 +234,11 @@ export function estimateRequestBodyBytes(messages: KimiMessage[]): number {
 		}
 	}
 	return bytes + JSON_OVERHEAD_BYTES;
+}
+
+/** Exact UTF-8 JSON body size after all tools and request parameters are attached. */
+export function measureKimiRequestBodyBytes(request: KimiRequest): number {
+	return Buffer.byteLength(JSON.stringify(request), 'utf8');
 }
 
 /** Formats a byte count as KiB/MiB for error messages. */

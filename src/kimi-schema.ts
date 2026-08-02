@@ -9,9 +9,18 @@
  *
  * Ported from kimi-code: packages/kosong/src/providers/kimi-schema.ts
  */
+export const MAX_NORMALIZED_SCHEMA_NODES = 50_000;
+export const MAX_NORMALIZED_SCHEMA_STRING_CHARS = 512 * 1024;
+
+interface ResolveBudget {
+  nodes: number;
+  stringChars: number;
+}
+
 export function derefJsonSchema(schema: Record<string, unknown>): Record<string, unknown> {
   const visited = new Set<string>();
-  const result = resolveNode(schema, schema, visited) as Record<string, unknown>;
+  const budget: ResolveBudget = { nodes: 0, stringChars: 0 };
+  const result = resolveNode(schema, schema, visited, budget) as Record<string, unknown>;
 
   if (!hasUnresolvedDefinitionRef(result, '$defs')) {
     delete result['$defs'];
@@ -143,9 +152,15 @@ function hasUnresolvedDefinitionRef(node: unknown, bucketKey: string): boolean {
   return false;
 }
 
-function resolveNode(node: unknown, root: Record<string, unknown>, visited: Set<string>): unknown {
+function resolveNode(
+  node: unknown,
+  root: Record<string, unknown>,
+  visited: Set<string>,
+  budget: ResolveBudget,
+): unknown {
+  consumeResolveBudget(node, budget);
   if (Array.isArray(node)) {
-    return node.map((item) => resolveNode(item, root, visited));
+    return node.map((item) => resolveNode(item, root, visited, budget));
   }
 
   if (typeof node === 'object' && node !== null) {
@@ -160,13 +175,13 @@ function resolveNode(node: unknown, root: Record<string, unknown>, visited: Set<
         const resolvedRef = resolveLocalJsonPointer(root, ref);
         if (resolvedRef.found) {
           visited.add(ref);
-          const resolved = resolveNode(resolvedRef.value, root, visited);
+          const resolved = resolveNode(resolvedRef.value, root, visited, budget);
           visited.delete(ref);
           if (typeof resolved === 'object' && resolved !== null && !Array.isArray(resolved)) {
             const merged: Record<string, unknown> = { ...(resolved as Record<string, unknown>) };
             for (const [key, value] of Object.entries(obj)) {
               if (key === '$ref') continue;
-              merged[key] = resolveNode(value, root, visited);
+              merged[key] = resolveNode(value, root, visited, budget);
             }
             return merged;
           }
@@ -178,12 +193,32 @@ function resolveNode(node: unknown, root: Record<string, unknown>, visited: Set<
 
     const resolved: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(obj)) {
-      resolved[key] = resolveNode(value, root, visited);
+      resolved[key] = resolveNode(value, root, visited, budget);
     }
+
     return resolved;
   }
 
   return node;
+}
+
+function consumeResolveBudget(node: unknown, budget: ResolveBudget): void {
+  budget.nodes++;
+  if (typeof node === 'string') {
+    budget.stringChars += node.length;
+  } else if (isRecord(node)) {
+    for (const key of Object.keys(node)) {
+      budget.stringChars += key.length;
+    }
+  }
+  if (
+    budget.nodes > MAX_NORMALIZED_SCHEMA_NODES ||
+    budget.stringChars > MAX_NORMALIZED_SCHEMA_STRING_CHARS
+  ) {
+    throw new Error(
+      `Tool schema is too large after resolving references (limit: ${MAX_NORMALIZED_SCHEMA_NODES} nodes / ${MAX_NORMALIZED_SCHEMA_STRING_CHARS} string characters).`,
+    );
+  }
 }
 
 function isLocalJsonPointerRef(ref: string): boolean {

@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import OpenAI from 'openai';
 import { KimiApiClient } from './api-client';
 import { ConfigurationManager } from './config';
-import { SessionContextTracker, formatBytes } from './context-tracker';
+import { DEFAULT_MAX_BODY_BYTES, SessionContextTracker, formatBytes, measureKimiRequestBodyBytes } from './context-tracker';
 import { MODELS, toChatInfo } from './models';
 import { fetchKimiModels } from './models-client';
 import { KimiRequestBuilder } from './request-builder';
@@ -11,15 +11,29 @@ import { transliterateMessages } from './transliterate';
 import { UsageTracker, hasUsage } from './usage';
 import { ModelRegistry } from './model-registry';
 import { ReasoningKeyDialect } from './reasoning-key';
-import { normalizeToolCallIds } from './tool-call-id';
+import { normalizeToolCallIds, sanitizeToolCallId } from './tool-call-id';
 import { normalizeKimiToolSchema } from './kimi-schema';
-import type { KimiContentPart, KimiMessage, KimiTool, KimiToolCall, ModelDefaults, ModelConfigOverride } from './types';
+import type { KimiContentPart, KimiMessage, KimiRequest, KimiTool, KimiToolCall, ModelDefaults, ModelConfigOverride } from './types';
 
 // ═══════════════════════════════════════════════════════════════════════
 // Constants
 // ═══════════════════════════════════════════════════════════════════════
 
 const DEFAULT_MODELS_ENDPOINT = 'https://api.kimi.com/coding/v1/models';
+/** Keep fallback response state bounded when the proposed thinking API is unavailable. */
+const MAX_FALLBACK_REASONING_BUFFER_CHARS = 8192;
+/** Defensive cap for a malformed or unbounded streaming tool-call fragment. */
+export const MAX_STREAM_TOOL_CALLS = 128;
+export const MAX_STREAM_TOOL_NAME_CHARS = 1024;
+export const MAX_STREAM_TOOL_ARGUMENT_CHARS = 256 * 1024;
+export const MAX_STREAM_TOOL_ARGUMENT_TOTAL_CHARS = 1024 * 1024;
+export const MAX_REQUEST_TOOLS = 128;
+export const MAX_TOOL_NAME_CHARS = 1024;
+export const MAX_TOOL_DESCRIPTION_CHARS = 64 * 1024;
+export const MAX_TOOL_SCHEMA_BYTES = 256 * 1024;
+export const MAX_TOTAL_TOOL_BYTES = 1024 * 1024;
+export const MAX_NON_STREAMING_OUTPUT_TOKENS = 65_536;
+const MAX_RETAINED_DIAGNOSTIC_CHARS = 4096;
 
 /**
  * Appended to the system prompt when the transliterate optimizer is on.
@@ -43,6 +57,21 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
     private readonly disposables: vscode.Disposable[] = [];
     /** Guards against repeatedly triggering compaction within one session. */
     private autoCompactTriggered = false;
+    private lastCatalogRefresh: {
+        kind: 'idle' | 'ok' | 'error';
+        message: string;
+        timestamp?: string;
+        endpoint?: string;
+        modelCount?: number;
+    } = { kind: 'idle', message: 'No refresh attempt has been made yet.' };
+    private lastRequest: {
+        kind: 'idle' | 'ok' | 'error';
+        message: string;
+        timestamp?: string;
+        modelId?: string;
+        apiModelId?: string;
+        endpoint?: string;
+    } = { kind: 'idle', message: 'No requests have been sent yet.' };
     /**
      * Per-endpoint reasoning-field dialect: learns which wire key the server
      * uses (reasoning_content / reasoning / reasoning_details) and echoes
@@ -50,6 +79,7 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
      * kimi-code's shared ReasoningKeyDialect per provider instance.
      */
     private readonly reasoningDialect = new ReasoningKeyDialect();
+    private modelRefreshInFlight: Promise<void> | undefined;
 
     constructor(
         private readonly configManager: ConfigurationManager,
@@ -72,6 +102,93 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
         this._onDidChange.fire();
     }
 
+    private updateCatalogRefreshState(
+        kind: 'ok' | 'error',
+        message: string,
+        endpoint: string,
+        modelCount?: number,
+    ): void {
+        this.lastCatalogRefresh = {
+            kind,
+            message: truncateRetainedText(message),
+            timestamp: new Date().toISOString(),
+            endpoint,
+            modelCount,
+        };
+    }
+
+    private updateRequestState(
+        kind: 'ok' | 'error',
+        message: string,
+        modelId: string,
+        apiModelId: string,
+        endpoint: string,
+    ): void {
+        this.lastRequest = {
+            kind,
+            message: truncateRetainedText(message),
+            timestamp: new Date().toISOString(),
+            modelId,
+            apiModelId,
+            endpoint,
+        };
+    }
+
+    async getDiagnosticsReport(): Promise<string> {
+        const apiKey = await this.configManager.getApiKey();
+        const selectedModelId = this.configManager.getModel();
+        const modelInfo = this.modelRegistry.findById(selectedModelId);
+        const apiModelId = this.configManager.getApiModelId(selectedModelId);
+        const modelConfig = this.configManager.getModelConfig(selectedModelId);
+        const modelDefaults = this.modelRegistry.getDefaults(selectedModelId);
+        const capabilities = this.modelRegistry.getCapabilities(selectedModelId);
+        const endpoint = this.configManager.getEndpoint();
+        const serverModels = this.configManager.getServerModels() ?? [];
+        const catalogSummary = this.lastCatalogRefresh.kind === 'idle'
+            ? this.lastCatalogRefresh.message
+            : `${this.lastCatalogRefresh.kind.toUpperCase()} — ${this.lastCatalogRefresh.message}`;
+        const requestSummary = this.lastRequest.kind === 'idle'
+            ? this.lastRequest.message
+            : `${this.lastRequest.kind.toUpperCase()} — ${this.lastRequest.message}`;
+
+        const nextSteps: string[] = [];
+        if (!apiKey) {
+            nextSteps.push('Set an API key with "Kimi Copilot: Set API Key".');
+        }
+        if (this.lastCatalogRefresh.kind === 'error') {
+            nextSteps.push('Check the endpoint and API key; the /models refresh failed.');
+        }
+        if (this.lastRequest.kind === 'error') {
+            nextSteps.push('Inspect the last request error and verify the selected model override.');
+        }
+        if (!modelInfo) {
+            nextSteps.push('Select a registered model from the picker or refresh the provider.');
+        }
+        if (nextSteps.length === 0) {
+            nextSteps.push('No immediate action required.');
+        }
+
+        return [
+            'Kimi Copilot BYOK diagnostics',
+            '',
+            `- Timestamp: ${new Date().toISOString()}`,
+            `- Selected picker model: ${selectedModelId}`,
+            `- Effective API model id: ${apiModelId}`,
+            `- API key: ${apiKey ? 'configured (stored securely)' : 'not configured'}`,
+            `- Endpoint: ${endpoint}`,
+            `- Model catalog refresh: ${catalogSummary}`,
+            `- Cached server models: ${serverModels.length}`,
+            `- Model defaults: temperature=${modelDefaults?.temperature ?? 'default'}, topP=${modelDefaults?.topP ?? 'default'}, thinking=${modelDefaults?.thinking?.type ?? 'default'}, reasoningEffort=${modelDefaults?.reasoningEffort ?? 'default'}, requestPolicy=${modelDefaults?.requestPolicy ?? 'default'}`,
+            `- Model config overrides: toolCalling=${modelConfig.toolCalling ?? 'inherit'}, thinking=${modelConfig.thinking?.type ?? 'inherit'}, reasoningEffort=${modelConfig.reasoningEffort ?? 'inherit'}, overrideModelId=${modelConfig.overrideModelId ?? 'none'}, maxOutputTokens=${modelConfig.maxOutputTokens ?? 'inherit'}`,
+            `- Capabilities: toolCalling=${capabilities?.toolCalling ?? 'unknown'}, imageInput=${capabilities?.imageInput ?? 'unknown'}, thinking=${capabilities?.thinking ?? 'unknown'}`,
+            `- Server support flags: supportsThinkingType=${modelInfo?.supportsThinkingType ?? 'unknown'}, serverContextLength=${modelInfo?.serverContextLength ?? 'unknown'}`,
+            `- Last request: ${requestSummary}`,
+            '',
+            'Suggested next steps:',
+            ...nextSteps.map((step) => `- ${step}`),
+        ].join('\n');
+    }
+
     /** Applies the cached server catalog (survives restarts) to the registry. */
     applyCachedServerModels(): void {
         this.modelRegistry.applyServerCatalog(this.configManager.getServerModels());
@@ -84,14 +201,27 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
      * hard-coded/cached values stay in effect. Safe to fire-and-forget.
      */
     async refreshModelsFromServer(): Promise<void> {
+        if (this.modelRefreshInFlight) return this.modelRefreshInFlight;
+        const refresh = this.refreshModelsFromServerOnce().finally(() => {
+            if (this.modelRefreshInFlight === refresh) {
+                this.modelRefreshInFlight = undefined;
+            }
+        });
+        this.modelRefreshInFlight = refresh;
+        return refresh;
+    }
+
+    private async refreshModelsFromServerOnce(): Promise<void> {
         const apiKey = await this.configManager.getApiKey();
+        const endpoint = this.deriveModelsEndpoint();
         if (!apiKey) {
+            this.updateCatalogRefreshState('error', 'API key not configured.', endpoint);
             this.outputChannel.info('Skipping /models refresh: API key not set');
             return;
         }
-        const endpoint = this.deriveModelsEndpoint();
         const result = await fetchKimiModels(apiKey, endpoint, this.configManager.getTimeout());
         if (result.kind !== 'ok') {
+            this.updateCatalogRefreshState('error', result.message, endpoint);
             this.outputChannel.warn(
                 `Failed to refresh model catalog from ${endpoint}: ${result.message}`,
             );
@@ -99,6 +229,7 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
         }
         this.modelRegistry.applyServerCatalog(result.models);
         await this.configManager.setServerModels([...result.models]);
+        this.updateCatalogRefreshState('ok', `Refreshed ${result.models.length} models from the server.`, endpoint, result.models.length);
         this.outputChannel.info(
             `Model catalog refreshed from server (${result.models.length} models): ` +
             result.models.map((m) => `${m.id} ctx=${m.contextLength}`).join(', '),
@@ -172,15 +303,28 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
         token: vscode.CancellationToken,
         extras?: { testMode?: boolean },
     ): Promise<void> {
+        const endpoint = this.configManager.getEndpoint();
         const apiKey = await this.configManager.getApiKey();
-        if (!apiKey) {
-            throw new vscode.LanguageModelError(
-                'Kimi API key is not configured. Run "Kimi Copilot: Set API Key".',
-            );
-        }
-
         const modelName = this.configManager.getApiModelId(modelInfo.id);
-        const modelConfig = this.configManager.getModelConfig(modelInfo.id);
+        let normalizedMessages: KimiMessage[];
+        let tools: KimiTool[] | undefined;
+        let request: KimiRequest;
+
+        try {
+            if (!apiKey) {
+                this.updateRequestState(
+                    'error',
+                    'Kimi API key is not configured. Run "Kimi Copilot: Set API Key".',
+                    modelInfo.id,
+                    modelName,
+                    endpoint,
+                );
+                throw new vscode.LanguageModelError(
+                    'Kimi API key is not configured. Run "Kimi Copilot: Set API Key".',
+                );
+            }
+
+            const modelConfig = this.configManager.getModelConfig(modelInfo.id);
         const modelDefaults = this.modelRegistry.getDefaults(modelInfo.id);
         const modelDefinition = this.modelRegistry.findById(modelInfo.id);
         const requestPolicy = detectRequestPolicy(
@@ -200,7 +344,12 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
             thinking = { type: 'enabled' };
         }
 
-        const reasoningEffort = resolveReasoningEffortFromOptions(options, modelDefaults, modelConfig);
+        const reasoningEffort = resolveReasoningEffortFromOptions(
+            options,
+            modelDefaults,
+            modelConfig,
+            modelDefinition?.reasoningEfforts,
+        );
 
         // ── Resolve thinking keep (echo previous reasoning back to API) ──
         const thinkingKeep = modelConfig.thinkingKeep;
@@ -212,6 +361,14 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
             : maxOutputTokens;
 
         const enableStreaming = extras?.testMode ? false : this.configManager.getEnableStreaming();
+        const memorySafeMaxTokens = enableStreaming
+            ? maxTokens
+            : Math.min(maxTokens, MAX_NON_STREAMING_OUTPUT_TOKENS);
+        if (!enableStreaming && memorySafeMaxTokens < maxTokens && !extras?.testMode) {
+            this.outputChannel.warn(
+                `Non-streaming output budget capped at ${MAX_NON_STREAMING_OUTPUT_TOKENS.toLocaleString('en-US')} tokens to avoid buffering an oversized completion in the extension host.`,
+            );
+        }
         const transliterate = this.configManager.getTransliterate(modelInfo.id);
         let systemPrompt = this.configManager.getSystemPrompt(modelInfo.id);
         if (transliterate) {
@@ -272,9 +429,9 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
         const remainingContext = estimate.limit - estimate.tokens;
         const clampedMaxTokens = extras?.testMode
             ? 1
-            : Math.max(1, Math.min(maxTokens, remainingContext));
-        if (clampedMaxTokens < maxTokens && !extras?.testMode) {
-            const reductionPct = Math.round((1 - clampedMaxTokens / maxTokens) * 100);
+            : Math.max(1, Math.min(memorySafeMaxTokens, remainingContext));
+        if (clampedMaxTokens < memorySafeMaxTokens && !extras?.testMode) {
+            const reductionPct = Math.round((1 - clampedMaxTokens / memorySafeMaxTokens) * 100);
             this.outputChannel.info(
                 `Completion budget clamped: ${maxTokens.toLocaleString('en-US')} → ${clampedMaxTokens.toLocaleString('en-US')} (context window ${estimate.limit.toLocaleString('en-US')} − estimated ${estimate.tokens.toLocaleString('en-US')} input = ${remainingContext.toLocaleString('en-US')} remaining, −${reductionPct}%)`,
             );
@@ -292,10 +449,10 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
         }
 
         // ── Normalize tool call IDs for Kimi API (max 64 chars) ──────
-        const normalizedMessages = normalizeToolCallIds(allMessages);
+        normalizedMessages = normalizeToolCallIds(allMessages);
 
         // ── Build request via Builder ───────────────────────────────
-        const tools = convertTools(toolCallingEnabled, options.tools);
+        tools = convertTools(toolCallingEnabled, options.tools);
         const requestPolicyStrategy = getRequestPolicy(requestPolicy);
 
         const builder = new KimiRequestBuilder(modelInfo.id, modelName)
@@ -313,10 +470,27 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
             .withSystemPrompt(systemPrompt)
             .withTransliterate(transliterate);
 
-        const request = builder.build();
+        request = builder.build();
+        const requestBodyBytes = measureKimiRequestBodyBytes(request);
+        if (requestBodyBytes >= DEFAULT_MAX_BODY_BYTES) {
+            throw new vscode.LanguageModelError(
+                `Kimi request-size limit exceeded after including tool schemas and request parameters: ${formatBytes(requestBodyBytes)}. Remove tools, attachments, or conversation history; the API limit is ${formatBytes(DEFAULT_MAX_BODY_BYTES)}.`,
+            );
+        }
+        } catch (err) {
+            this.outputChannel.error(`Request setup failed: ${formatErrorForLog(err)}`);
+            const message = err instanceof Error ? err.message : String(err);
+            this.updateRequestState(
+                'error',
+                message,
+                modelInfo.id,
+                modelName,
+                endpoint,
+            );
+            throw new vscode.LanguageModelError(message, { cause: err });
+        }
 
         // ── Send via Facade ─────────────────────────────────────────
-        const endpoint = this.configManager.getEndpoint();
         const apiClient = new KimiApiClient(apiKey, endpoint, {
             timeoutMs: this.configManager.getTimeout(),
             maxRetries: this.configManager.getMaxRetries(),
@@ -352,40 +526,59 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
 
         try {
             const chatResult = await apiClient.chat(request, token);
+            try {
 
-            // Log trace-id for request diagnostics (available from response headers
-            // before the stream body, via the OpenAI SDK's withResponse()).
-            if (chatResult.traceId) {
-                this.outputChannel.info(`trace-id: ${chatResult.traceId}`);
+                // Log trace-id for request diagnostics (available from response headers
+                // before the stream body, via the OpenAI SDK's withResponse()).
+                if (chatResult.traceId) {
+                    this.outputChannel.info(`trace-id: ${chatResult.traceId}`);
+                }
+
+                const networkTime = Date.now() - startTime;
+
+                if (chatResult.isStream) {
+                    const timing = await streamOpenAIResponse(
+                        chatResult.data as AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
+                        progress,
+                        token,
+                        this.outputChannel,
+                        this.usageTracker,
+                        this.reasoningDialect,
+                    );
+                    this.outputChannel.info(
+                        `← stream done: TTFT ${timing.ttftMs}ms, decode ${timing.streamDurationMs}ms, ${timing.chunkCount} chunks, network ${networkTime}ms, total ${Date.now() - startTime}ms`,
+                    );
+                } else {
+                    await completeOpenAIResponse(
+                        chatResult.data as OpenAI.Chat.Completions.ChatCompletion,
+                        progress,
+                        this.outputChannel,
+                        this.usageTracker,
+                        this.reasoningDialect,
+                    );
+                    this.outputChannel.info(`← completed in ${Date.now() - startTime}ms (non-streaming)`);
+                }
+            } finally {
+                chatResult.dispose();
             }
 
-            const networkTime = Date.now() - startTime;
-
-            if (chatResult.isStream) {
-                const timing = await streamOpenAIResponse(
-                    chatResult.data as AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
-                    progress,
-                    token,
-                    this.outputChannel,
-                    this.usageTracker,
-                    this.reasoningDialect,
-                );
-                this.outputChannel.info(
-                    `← stream done: TTFT ${timing.ttftMs}ms, decode ${timing.streamDurationMs}ms, ${timing.chunkCount} chunks, network ${networkTime}ms, total ${Date.now() - startTime}ms`,
-                );
-            } else {
-                await completeOpenAIResponse(
-                    chatResult.data as OpenAI.Chat.Completions.ChatCompletion,
-                    progress,
-                    this.outputChannel,
-                    this.usageTracker,
-                    this.reasoningDialect,
-                );
-                this.outputChannel.info(`← completed in ${Date.now() - startTime}ms (non-streaming)`);
-            }
+            this.updateRequestState(
+                'ok',
+                `Request completed successfully for ${modelName} at ${endpoint}.`,
+                modelInfo.id,
+                modelName,
+                endpoint,
+            );
         } catch (err) {
-            this.outputChannel.error('Request failed', err);
+            this.outputChannel.error(`Request failed: ${formatErrorForLog(err)}`);
             if (err instanceof vscode.LanguageModelError) {
+                this.updateRequestState(
+                    'error',
+                    err.message,
+                    modelInfo.id,
+                    modelName,
+                    endpoint,
+                );
                 throw err;
             }
             const message = err instanceof Error ? err.message : String(err);
@@ -409,6 +602,13 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
                 void this.refreshModelsFromServer();
                 this.triggerAutoCompact('api', true);
             }
+            this.updateRequestState(
+                'error',
+                message,
+                modelInfo.id,
+                modelName,
+                endpoint,
+            );
             throw new vscode.LanguageModelError(message, { cause: err });
         }
     }
@@ -540,17 +740,16 @@ export function convertMessages(
     messages: readonly vscode.LanguageModelChatRequestMessage[],
 ): KimiMessage[] {
     const result: KimiMessage[] = [];
+    let imagePayloadBytes = 0;
 
     for (const message of messages) {
         const role = roleToString(message.role);
-        let content = '';
         const contentParts: KimiContentPart[] = [];
         const toolCalls: KimiToolCall[] = [];
         const toolResults: Array<{ callId: string; content: string }> = [];
 
         for (const part of message.content) {
             if (part instanceof vscode.LanguageModelTextPart) {
-                content += part.value;
                 contentParts.push({ type: 'text', text: part.value });
             } else if (isLanguageModelDataPart(part)) {
                 if (part.mimeType.startsWith('image/')) {
@@ -561,16 +760,25 @@ export function convertMessages(
                             `Unsupported image format "${part.mimeType}". The Kimi API accepts only PNG, JPEG, GIF, and WebP. Convert the image and try again.`,
                         );
                     }
+                    imagePayloadBytes += part.data.byteLength;
+                    if (imagePayloadBytes > MAX_IMAGE_PAYLOAD_BYTES) {
+                        throw new vscode.LanguageModelError(
+                            `Image attachments are too large for a Kimi request (${formatBytes(imagePayloadBytes)} raw). Remove some images or use smaller files; the API request body limit is ${formatBytes(DEFAULT_MAX_BODY_BYTES)}.`,
+                        );
+                    }
                     contentParts.push({
                         type: 'image_url',
                         image_url: {
-                            url: `data:${part.mimeType};base64,${Buffer.from(part.data).toString('base64')}`,
+                            url: `data:${part.mimeType};base64,${Buffer.from(
+                                part.data.buffer,
+                                part.data.byteOffset,
+                                part.data.byteLength,
+                            ).toString('base64')}`,
                         },
                     });
                 }
             } else if (part instanceof vscode.LanguageModelPromptTsxPart) {
                 const value = typeof part.value === 'string' ? part.value : JSON.stringify(part.value);
-                content += value;
                 contentParts.push({ type: 'text', text: value });
             } else if (part instanceof vscode.LanguageModelToolCallPart) {
                 toolCalls.push({
@@ -600,10 +808,14 @@ export function convertMessages(
         }
 
         if (role === 'assistant') {
-            if (content || toolCalls.length > 0) {
+            const textContent = contentParts
+                .filter((part): part is { type: 'text'; text: string } => part.type === 'text')
+                .map((part) => part.text)
+                .join('');
+            if (textContent || toolCalls.length > 0) {
                 const msg: KimiMessage = {
                     role: 'assistant',
-                    content: content || '',
+                    content: textContent || '',
                 };
                 if (toolCalls.length > 0) {
                     msg.tool_calls = toolCalls;
@@ -611,10 +823,15 @@ export function convertMessages(
                 result.push(msg);
             }
         } else {
-            if (content) {
+            const hasTextContent = contentParts.some(
+                (part) => part.type === 'text' && part.text.length > 0,
+            );
+            if (hasTextContent) {
                 result.push({
                     role: role as 'user' | 'assistant',
-                    content: contentParts.length > 1 ? contentParts : content,
+                    content: contentParts.length > 1
+                        ? contentParts
+                        : (contentParts[0] as { type: 'text'; text: string }).text,
                 });
             } else if (contentParts.length > 0) {
                 result.push({ role: role as 'user' | 'assistant', content: contentParts });
@@ -683,6 +900,8 @@ export const SUPPORTED_IMAGE_MIME_TYPES = new Set([
     'image/gif',
     'image/webp',
 ]);
+/** Keep base64 image expansion below the API body cap and avoid large temporary strings. */
+export const MAX_IMAGE_PAYLOAD_BYTES = Math.floor(DEFAULT_MAX_BODY_BYTES * 0.75);
 
 export function isSupportedImageMimeType(mimeType: string): boolean {
     return SUPPORTED_IMAGE_MIME_TYPES.has(mimeType.toLowerCase());
@@ -755,6 +974,7 @@ export function resolveReasoningEffortFromOptions(
     options: vscode.ProvideLanguageModelChatResponseOptions,
     modelDefaults: ModelDefaults | undefined,
     modelConfig: ModelConfigOverride,
+    supportedEfforts?: readonly ('low' | 'high' | 'max')[],
 ): 'low' | 'high' | 'max' {
     // Copilot Chat passes user-selected configuration values (e.g. from the
     // Thinking Effort picker) through `modelConfiguration` or `configuration`.
@@ -765,11 +985,15 @@ export function resolveReasoningEffortFromOptions(
     const configured =
         extendedOptions.modelConfiguration?.reasoningEffort ??
         extendedOptions.configuration?.reasoningEffort;
-    return resolveReasoningEffort(
+    const resolved = resolveReasoningEffort(
         configured !== undefined ? { reasoningEffort: configured } : options.modelOptions,
         modelDefaults,
         modelConfig,
     );
+    if (supportedEfforts && supportedEfforts.length > 0 && !supportedEfforts.includes(resolved)) {
+        return supportedEfforts[0];
+    }
+    return resolved;
 }
 
 // buildKimiRequest is now re-exported from './request-policy' above.
@@ -782,14 +1006,31 @@ export function convertTools(
     if (!toolCallingCapability || !tools || tools.length === 0) {
         return undefined;
     }
+    if (tools.length > MAX_REQUEST_TOOLS) {
+        throw new vscode.LanguageModelError(
+            `Too many tools for one Kimi request (${tools.length}); the provider limit is ${MAX_REQUEST_TOOLS}.`,
+        );
+    }
 
-    return tools.map((tool) => {
+    const converted: KimiTool[] = [];
+    let totalBytes = 0;
+    for (const tool of tools) {
+        if (tool.name.length > MAX_TOOL_NAME_CHARS) {
+            throw new vscode.LanguageModelError(
+                `Tool name "${tool.name.slice(0, 80)}" exceeds the ${MAX_TOOL_NAME_CHARS}-character provider limit.`,
+            );
+        }
+        if (tool.description.length > MAX_TOOL_DESCRIPTION_CHARS) {
+            throw new vscode.LanguageModelError(
+                `Description for tool "${tool.name}" exceeds the ${MAX_TOOL_DESCRIPTION_CHARS}-character provider limit.`,
+            );
+        }
         const rawParams = tool.inputSchema as Record<string, unknown> | undefined;
         const parameters =
             rawParams !== undefined && Object.keys(rawParams).length > 0
                 ? normalizeKimiToolSchema(rawParams)
                 : undefined;
-        return {
+        const convertedTool: KimiTool = {
             type: 'function' as const,
             function: {
                 name: tool.name,
@@ -797,7 +1038,24 @@ export function convertTools(
                 parameters,
             },
         };
-    });
+        const schemaBytes = parameters === undefined
+            ? 0
+            : Buffer.byteLength(JSON.stringify(parameters), 'utf8');
+        if (schemaBytes > MAX_TOOL_SCHEMA_BYTES) {
+            throw new vscode.LanguageModelError(
+                `Schema for tool "${tool.name}" is ${formatBytes(schemaBytes)}, above the ${formatBytes(MAX_TOOL_SCHEMA_BYTES)} provider limit.`,
+            );
+        }
+        const toolBytes = Buffer.byteLength(JSON.stringify(convertedTool), 'utf8');
+        totalBytes += toolBytes;
+        if (totalBytes > MAX_TOTAL_TOOL_BYTES) {
+            throw new vscode.LanguageModelError(
+                `Combined tool definitions exceed the ${formatBytes(MAX_TOTAL_TOOL_BYTES)} provider limit.`,
+            );
+        }
+        converted.push(convertedTool);
+    }
+    return converted;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -903,11 +1161,17 @@ async function completeOpenAIResponse(
     if (message.tool_calls) {
         for (const call of message.tool_calls) {
             if (call.type !== 'function') continue;
+            const parsed = parseToolCallArguments(call.function.arguments);
+            if (!parsed.valid) {
+                throw new vscode.LanguageModelError(
+                    `Kimi returned invalid arguments for tool call "${call.id}": ${parsed.reason}`,
+                );
+            }
             progress.report(
                 new vscode.LanguageModelToolCallPart(
                     call.id,
                     call.function.name,
-                    safeParseArgs(call.function.arguments),
+                    parsed.input,
                 ),
             );
         }
@@ -927,6 +1191,99 @@ interface StreamTiming {
     chunkCount: number;
 }
 
+export interface StreamingToolCallFragment {
+    index: number;
+    id?: string;
+    type?: string;
+    function?: { name?: string; arguments?: string };
+}
+
+export interface BufferedStreamingToolCall {
+    id: string;
+    name: string;
+    args: string;
+    truncated: boolean;
+}
+
+/**
+ * Bounded accumulator for fragmented OpenAI-compatible tool-call deltas.
+ * The index is the stable key across chunks; IDs are normalized only when
+ * draining so continuation turns receive API-safe, unique IDs.
+ */
+export class StreamingToolCallAccumulator {
+    private readonly pending = new Map<number, BufferedStreamingToolCall>();
+    private totalArgumentChars = 0;
+
+    constructor(private readonly outputChannel?: Pick<vscode.LogOutputChannel, 'warn'>) {}
+
+    append(fragment: StreamingToolCallFragment): void {
+        if (!Number.isInteger(fragment.index) || fragment.index < 0) {
+            this.outputChannel?.warn(`Ignoring streaming tool call with invalid index: ${String(fragment.index)}.`);
+            return;
+        }
+
+        let existing = this.pending.get(fragment.index);
+        if (!existing) {
+            if (this.pending.size >= MAX_STREAM_TOOL_CALLS) {
+                this.outputChannel?.warn(
+                    `Ignoring streaming tool call index ${fragment.index}: maximum of ${MAX_STREAM_TOOL_CALLS} pending calls reached.`,
+                );
+                return;
+            }
+            existing = { id: '', name: '', args: '', truncated: false };
+            this.pending.set(fragment.index, existing);
+        }
+
+        if (fragment.id) existing.id = fragment.id;
+        if (fragment.function?.name && existing.name.length < MAX_STREAM_TOOL_NAME_CHARS) {
+            const remaining = MAX_STREAM_TOOL_NAME_CHARS - existing.name.length;
+            existing.name += fragment.function.name.slice(0, remaining);
+        }
+        if (fragment.function?.arguments) {
+            const callRemaining = MAX_STREAM_TOOL_ARGUMENT_CHARS - existing.args.length;
+            const totalRemaining = MAX_STREAM_TOOL_ARGUMENT_TOTAL_CHARS - this.totalArgumentChars;
+            const appendLength = Math.max(0, Math.min(
+                fragment.function.arguments.length,
+                callRemaining,
+                totalRemaining,
+            ));
+            if (appendLength > 0) {
+                existing.args += fragment.function.arguments.slice(0, appendLength);
+                this.totalArgumentChars += appendLength;
+            }
+            if (appendLength < fragment.function.arguments.length) {
+                existing.truncated = true;
+                this.outputChannel?.warn(
+                    `Truncated streaming arguments for tool call index ${fragment.index}: bounded per-call or total argument buffer reached.`,
+                );
+            }
+        }
+    }
+
+    drain(): BufferedStreamingToolCall[] {
+        const usedIds = new Set<string>();
+        const calls = [...this.pending.entries()]
+            .sort(([left], [right]) => left - right)
+            .map(([, call]) => {
+                const baseId = sanitizeToolCallId(call.id) || 'tool_call';
+                let id = baseId;
+                for (let suffix = 2; usedIds.has(id); suffix++) {
+                    const suffixText = `_${suffix}`;
+                    id = `${baseId.slice(0, Math.max(1, 64 - suffixText.length))}${suffixText}`;
+                }
+                usedIds.add(id);
+                return { ...call, id };
+            });
+        this.pending.clear();
+        this.totalArgumentChars = 0;
+        return calls;
+    }
+
+    get size(): number {
+        return this.pending.size;
+    }
+}
+
 async function streamOpenAIResponse(
     stream: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
     progress: vscode.Progress<vscode.LanguageModelResponsePart>,
@@ -938,30 +1295,35 @@ async function streamOpenAIResponse(
     const streamStart = Date.now();
     let firstChunkAt: number | undefined;
     let chunkCount = 0;
+    const usageAccumulator = new StreamingUsageAccumulator();
 
-    const pendingToolCalls = new Map<
-        number,
-        { id: string; name: string; args: string }
-    >();
+    const pendingToolCalls = new StreamingToolCallAccumulator(outputChannel);
 
     // Fallback reasoning buffer — used when LanguageModelThinkingPart is unavailable.
     let fallbackReasoningBuffer: string | undefined;
     let thinkingPartAvailable: boolean | undefined;
 
     const emitPendingToolCalls = (): void => {
-        if (pendingToolCalls.size === 0) return;
-        for (const call of pendingToolCalls.values()) {
+        for (const call of pendingToolCalls.drain()) {
             if (call.id && call.name) {
+                const parsed = parseToolCallArguments(call.args);
+                if (!parsed.valid) {
+                    outputChannel.warn(
+                        `Could not parse arguments for streaming tool call "${call.id}"${call.truncated ? ' after truncation' : ''}: ${parsed.reason}`,
+                    );
+                    throw new vscode.LanguageModelError(
+                        `Kimi returned invalid arguments for tool call "${call.id}"${call.truncated ? ' because the response exceeded the provider buffer limit' : ''}: ${parsed.reason}`,
+                    );
+                }
                 progress.report(
                     new vscode.LanguageModelToolCallPart(
                         call.id,
                         call.name,
-                        safeParseArgs(call.args),
+                        parsed.input,
                     ),
                 );
             }
         }
-        pendingToolCalls.clear();
     };
 
     const flushFallbackReasoning = (): void => {
@@ -982,6 +1344,9 @@ async function streamOpenAIResponse(
             tryReportThinkingPart(progress, text);
         } else {
             fallbackReasoningBuffer = (fallbackReasoningBuffer ?? '') + text;
+            if (fallbackReasoningBuffer.length >= MAX_FALLBACK_REASONING_BUFFER_CHARS) {
+                flushFallbackReasoning();
+            }
         }
     };
 
@@ -996,11 +1361,7 @@ async function streamOpenAIResponse(
 
             // Extract usage from chunk (Kimi may place it in choices[0].usage too)
             const rawChunk = chunk as unknown as Record<string, unknown>;
-            const rawUsage = extractChunkUsage(rawChunk);
-            if (rawUsage && hasUsage(rawUsage)) {
-                usageTracker.recordUsage(rawUsage);
-                reportCopilotContextUsage(progress, rawUsage);
-            }
+            usageAccumulator.observe(rawChunk);
 
             const choice = chunk.choices[0];
             if (!choice) continue;
@@ -1030,14 +1391,7 @@ async function streamOpenAIResponse(
 
             if (toolCalls) {
                 for (const tc of toolCalls) {
-                    let existing = pendingToolCalls.get(tc.index);
-                    if (!existing) {
-                        existing = { id: '', name: '', args: '' };
-                        pendingToolCalls.set(tc.index, existing);
-                    }
-                    if (tc.id) existing.id = tc.id;
-                    if (tc.function?.name) existing.name += tc.function.name;
-                    if (tc.function?.arguments) existing.args += tc.function.arguments;
+                    pendingToolCalls.append(tc);
                 }
             }
 
@@ -1057,6 +1411,11 @@ async function streamOpenAIResponse(
     // Stream ended — flush any remaining state
     if (fallbackReasoningBuffer) flushFallbackReasoning();
     emitPendingToolCalls();
+    const usage = usageAccumulator.drain();
+    if (usage) {
+        usageTracker.recordUsage(usage);
+        reportCopilotContextUsage(progress, usage);
+    }
 
     const streamEnd = Date.now();
     return {
@@ -1070,12 +1429,31 @@ async function streamOpenAIResponse(
  * Extract usage from a streaming chunk, checking both top-level and
  * choices[0].usage (Moonshot proprietary placement).
  */
-function extractChunkUsage(chunk: Record<string, unknown>): {
+export type StreamUsage = {
     prompt_tokens: number;
     completion_tokens: number;
     total_tokens: number;
     cached_tokens?: number;
-} | null {
+};
+
+export class StreamingUsageAccumulator {
+    private latest: StreamUsage | null = null;
+
+    observe(chunk: Record<string, unknown>): void {
+        const usage = extractChunkUsage(chunk);
+        if (usage && hasUsage(usage)) {
+            this.latest = usage;
+        }
+    }
+
+    drain(): StreamUsage | null {
+        const usage = this.latest;
+        this.latest = null;
+        return usage;
+    }
+}
+
+export function extractChunkUsage(chunk: Record<string, unknown>): StreamUsage | null {
     // Top-level usage
     const topUsage = chunk['usage'];
     if (topUsage !== null && topUsage !== undefined && typeof topUsage === 'object') {
@@ -1088,6 +1466,7 @@ function extractChunkUsage(chunk: Record<string, unknown>): {
                 cached_tokens: typeof u['cached_tokens'] === 'number' ? u['cached_tokens'] as number : undefined,
             };
         }
+
     }
     // choices[0].usage (Moonshot proprietary)
     const choices = chunk['choices'];
@@ -1109,11 +1488,36 @@ function extractChunkUsage(chunk: Record<string, unknown>): {
     return null;
 }
 
-function safeParseArgs(args: string): Record<string, unknown> {
+function truncateRetainedText(value: string): string {
+    return value.length <= MAX_RETAINED_DIAGNOSTIC_CHARS
+        ? value
+        : `${value.slice(0, MAX_RETAINED_DIAGNOSTIC_CHARS)}…`;
+}
+
+function formatErrorForLog(error: unknown): string {
+    const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+    return truncateRetainedText(message);
+}
+
+export interface ParsedToolCallArguments {
+    input: Record<string, unknown>;
+    valid: boolean;
+    reason?: string;
+}
+
+export function parseToolCallArguments(args: string): ParsedToolCallArguments {
     try {
-        return JSON.parse(args) as Record<string, unknown>;
-    } catch {
-        return {};
+        const parsed: unknown = JSON.parse(args);
+        if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+            return { input: {}, valid: false, reason: 'arguments must be a JSON object' };
+        }
+        return { input: parsed as Record<string, unknown>, valid: true };
+    } catch (error) {
+        return {
+            input: {},
+            valid: false,
+            reason: error instanceof Error ? error.message : String(error),
+        };
     }
 }
 
