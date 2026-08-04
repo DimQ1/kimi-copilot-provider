@@ -2,7 +2,7 @@
   "name": "kimi-copilot-provider",
   "displayName": "Kimi Copilot Provider",
   "description": "Use Kimi K3 and K2.x models in GitHub Copilot Chat — Thinking/reasoning display, vision, tool calling, zero config. 🎁 New to Kimi? Subscribe via referral and we both get up to 1-Year Membership Credits: https://kimi-bot.com/activities/viral-referral/share?scenario=subscribe&from=share_poster&invitation_code=ZKH245",
-  "version": "1.9.8",
+  "version": "1.9.9",
   "publisher": "kimi-ext",
   "license": "MIT",
   "icon": "icon.png",
@@ -260,6 +260,25 @@
           "type": "boolean",
           "default": true,
           "description": "Enable SSE streaming responses."
+        },
+        "kimiCopilot.dynamicToolLoading": {
+          "type": "boolean",
+          "default": true,
+          "description": "For large tool inventories, load only relevant tool definitions through Kimi message-level system.tools declarations. Disable to send all tools top-level."
+        },
+        "kimiCopilot.dynamicToolMaxCount": {
+          "type": "number",
+          "default": 32,
+          "minimum": 1,
+          "maximum": 256,
+          "description": "Maximum number of relevant tool definitions loaded into a request."
+        },
+        "kimiCopilot.dynamicToolMaxBytes": {
+          "type": "number",
+          "default": 262144,
+          "minimum": 16384,
+          "maximum": 1048576,
+          "description": "Maximum serialized size in bytes of dynamically loaded tool definitions."
         },
         "kimiCopilot.transliterate": {
           "type": "boolean",

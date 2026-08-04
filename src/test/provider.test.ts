@@ -1,6 +1,6 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
-import { buildKimiRequest, convertMessages, convertTools, extractTextContent, resolveReasoningEffort, resolveReasoningEffortFromOptions, formatThinkingAsText, tryReportThinkingPart, parseRetryAfterHeader, computeBackoffDelayMs, stripImagesToMarkers, isSupportedImageMimeType, MAX_IMAGE_PAYLOAD_BYTES, MAX_STREAM_TOOL_ARGUMENT_CHARS, MAX_STREAM_TOOL_ARGUMENT_TOTAL_CHARS, MAX_STREAM_TOOL_CALLS, MAX_TOOL_DESCRIPTION_CHARS, StreamingToolCallAccumulator, StreamingUsageAccumulator, parseToolCallArguments } from '../provider';
+import { buildKimiRequest, convertMessages, convertTools, extractTextContent, resolveReasoningEffort, resolveReasoningEffortFromOptions, formatThinkingAsText, tryReportThinkingPart, parseRetryAfterHeader, computeBackoffDelayMs, stripImagesToMarkers, isSupportedImageMimeType, MAX_IMAGE_PAYLOAD_BYTES, MAX_STREAM_TOOL_ARGUMENT_CHARS, MAX_STREAM_TOOL_ARGUMENT_TOTAL_CHARS, MAX_STREAM_TOOL_CALLS, MAX_TOOL_DESCRIPTION_CHARS, StreamingToolCallAccumulator, StreamingUsageAccumulator, parseToolCallArguments, selectDynamicTools } from '../provider';
 import type { KimiRequest } from '../types';
 import { MODELS, toChatInfo } from '../models';
 import { applyServerModels, MAX_SERVER_MODELS, sanitizeServerModels } from '../models-client';
@@ -259,6 +259,42 @@ suite('provider helpers', () => {
                 { name: 'tool1', description: 'desc', inputSchema: {} },
             ] as vscode.LanguageModelChatTool[]);
             assert.strictEqual(result, undefined);
+        });
+
+        suite('selectDynamicTools', () => {
+            test('loads relevant tools as bounded message-level declarations', () => {
+                const tools: KimiTool[] = Array.from({ length: 40 }, (_, index) => ({
+                    type: 'function',
+                    function: {
+                        name: index === 7 ? 'create_github_pr' : `tool_${index}`,
+                        description: index === 7 ? 'Create a pull request in GitHub' : 'Unrelated utility',
+                        parameters: { type: 'object' },
+                    },
+                }));
+                const result = selectDynamicTools(tools, [{ role: 'user', content: 'Please create a GitHub PR' }], {
+                    enabled: true,
+                    maxCount: 4,
+                    maxBytes: 32 * 1024,
+                });
+
+                assert.strictEqual(result.topLevelTools, undefined);
+                assert.strictEqual(result.loadedCount, 4);
+                assert.strictEqual(result.dynamicTools[0].function.name, 'create_github_pr');
+            });
+
+            test('keeps all tools top-level when dynamic loading is disabled or unnecessary', () => {
+                const tools: KimiTool[] = [{
+                    type: 'function',
+                    function: { name: 'one', description: 'one', parameters: { type: 'object' } },
+                }];
+                const result = selectDynamicTools(tools, [{ role: 'user', content: 'hello' }], {
+                    enabled: true,
+                    maxCount: 1,
+                    maxBytes: 1024,
+                });
+                assert.strictEqual(result.topLevelTools, tools);
+                assert.deepStrictEqual(result.dynamicTools, []);
+            });
         });
 
         test('returns undefined for empty tools', () => {

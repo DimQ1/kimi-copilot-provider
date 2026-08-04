@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.9] - 2026-08-04
+
+### Added
+- **Kimi dynamic tool loading**: large VS Code/MCP tool inventories are ranked against recent user messages and exposed as bounded `messages[].tools` declarations instead of sending every definition top-level. The behavior is enabled by default and configurable through `dynamicToolLoading`, `dynamicToolMaxCount`, and `dynamicToolMaxBytes`.
+
 ## [1.9.8] - 2026-08-04
 
 ### Changed

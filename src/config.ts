@@ -175,6 +175,23 @@ export class ConfigurationManager {
 		return this.config.get<boolean>('enableStreaming', true);
 	}
 
+	/** Enables Kimi's message-level dynamic tool loading for large inventories. */
+	getDynamicToolLoading(): boolean {
+		return this.config.get<boolean>('dynamicToolLoading', true);
+	}
+
+	/** Maximum number of tool definitions exposed in one dynamically loaded batch. */
+	getDynamicToolMaxCount(): number {
+		const value = this.config.get<number>('dynamicToolMaxCount', 32);
+		return Math.max(1, Math.min(256, Math.floor(value)));
+	}
+
+	/** Maximum serialized size of a dynamically loaded tool batch. */
+	getDynamicToolMaxBytes(): number {
+		const value = this.config.get<number>('dynamicToolMaxBytes', 256 * 1024);
+		return Math.max(16 * 1024, Math.min(1024 * 1024, Math.floor(value)));
+	}
+
 	/**
 	 * Whether to transliterate Cyrillic request text to Latin for a model.
 	 * Precedence: per-model config > global setting > false.

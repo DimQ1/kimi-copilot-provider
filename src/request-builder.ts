@@ -245,8 +245,10 @@ export class KimiRequestBuilder {
 		}
 
 		// Tools
-		if (this._toolCallingEnabled && this._tools && this._tools.length > 0) {
-			request.tools = this._tools;
+		if (this._toolCallingEnabled) {
+			if (this._tools && this._tools.length > 0) {
+				request.tools = this._tools;
+			}
 			request.tool_choice = 'auto';
 		}
 

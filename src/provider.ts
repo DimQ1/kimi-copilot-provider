@@ -31,6 +31,9 @@ export const MAX_TOOL_NAME_CHARS = 1024;
 export const MAX_TOOL_DESCRIPTION_CHARS = 64 * 1024;
 export const MAX_TOOL_SCHEMA_BYTES = 256 * 1024;
 export const MAX_TOTAL_TOOL_BYTES = 1024 * 1024;
+export const DEFAULT_DYNAMIC_TOOL_THRESHOLD = 32;
+export const DEFAULT_DYNAMIC_TOOL_MAX_COUNT = 32;
+export const DEFAULT_DYNAMIC_TOOL_MAX_BYTES = 256 * 1024;
 export const MAX_NON_STREAMING_OUTPUT_TOKENS = 65_536;
 const MAX_RETAINED_DIAGNOSTIC_CHARS = 4096;
 
@@ -451,7 +454,32 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
         normalizedMessages = normalizeToolCallIds(allMessages);
 
         // ── Build request via Builder ───────────────────────────────
-        tools = convertTools(toolCallingEnabled, options.tools);
+        const availableTools = convertTools(toolCallingEnabled, options.tools);
+        const dynamicToolSelection = selectDynamicTools(
+            availableTools,
+            normalizedMessages,
+            {
+                enabled: this.configManager.getDynamicToolLoading(),
+                maxCount: this.configManager.getDynamicToolMaxCount(),
+                maxBytes: this.configManager.getDynamicToolMaxBytes(),
+            },
+        );
+        tools = dynamicToolSelection.topLevelTools;
+        if (dynamicToolSelection.dynamicTools.length > 0) {
+            normalizedMessages = [
+                ...normalizedMessages,
+                {
+                    role: 'system',
+                    content: '',
+                    tools: dynamicToolSelection.dynamicTools,
+                },
+            ];
+        }
+        if (dynamicToolSelection.loadedCount > 0) {
+            this.outputChannel.info(
+                `Dynamic tools: selected ${dynamicToolSelection.loadedCount}/${availableTools?.length ?? 0} definitions for this request.`,
+            );
+        }
         const requestPolicyStrategy = getRequestPolicy(requestPolicy);
 
         const builder = new KimiRequestBuilder(modelInfo.id, modelName)
@@ -997,6 +1025,79 @@ export function resolveReasoningEffortFromOptions(
 
 // buildKimiRequest is now re-exported from './request-policy' above.
 // convertTools and streaming/completion helpers follow.
+
+export interface DynamicToolSelectionOptions {
+    enabled: boolean;
+    maxCount: number;
+    maxBytes: number;
+}
+
+export interface DynamicToolSelection {
+    topLevelTools: KimiTool[] | undefined;
+    dynamicTools: KimiTool[];
+    loadedCount: number;
+}
+
+/**
+ * Selects a small, relevant tool batch without inventing a provider-side
+ * `search_tools` execution contract. The VS Code host still owns execution;
+ * Kimi only receives the selected declarations.
+ */
+export function selectDynamicTools(
+    tools: KimiTool[] | undefined,
+    messages: readonly KimiMessage[],
+    options: DynamicToolSelectionOptions,
+): DynamicToolSelection {
+        if (!tools || tools.length === 0) {
+            return { topLevelTools: undefined, dynamicTools: [], loadedCount: 0 };
+        }
+        if (!options.enabled || tools.length <= DEFAULT_DYNAMIC_TOOL_THRESHOLD) {
+            return { topLevelTools: tools, dynamicTools: [], loadedCount: 0 };
+        }
+
+        const query = messages
+            .filter((message) => message.role === 'user')
+            .slice(-4)
+            .map((message) => typeof message.content === 'string'
+                ? message.content
+                : message.content.filter((part) => part.type === 'text').map((part) => part.text).join(' '))
+            .join(' ')
+            .toLowerCase();
+        const terms = new Set(query.match(/[a-z0-9_:-]{2,}/gi)?.map((term) => term.toLowerCase()) ?? []);
+
+        const ranked = tools.map((tool, index) => {
+            const searchable = [
+                tool.function.name,
+                tool.function.description ?? '',
+                JSON.stringify(tool.function.parameters ?? {}),
+            ].join(' ').toLowerCase();
+            let score = 0;
+            for (const term of terms) {
+                if (searchable.includes(term)) score += tool.function.name.toLowerCase().includes(term) ? 4 : 1;
+            }
+            return { tool, index, score };
+        });
+        ranked.sort((left, right) => right.score - left.score || left.index - right.index);
+
+        const selected: KimiTool[] = [];
+        let bytes = 0;
+        for (const candidate of ranked) {
+            if (selected.length >= Math.max(1, Math.floor(options.maxCount))) break;
+            const candidateBytes = Buffer.byteLength(JSON.stringify(candidate.tool), 'utf8');
+            if (selected.length > 0 && bytes + candidateBytes > options.maxBytes) continue;
+            selected.push(candidate.tool);
+            bytes += candidateBytes;
+        }
+
+        if (selected.length === 0) {
+            selected.push(ranked[0].tool);
+        }
+        return {
+            topLevelTools: undefined,
+            dynamicTools: selected,
+            loadedCount: selected.length,
+        };
+    }
 
 export function convertTools(
     toolCallingCapability: boolean | undefined,
