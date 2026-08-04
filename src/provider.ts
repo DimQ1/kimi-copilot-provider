@@ -1042,6 +1042,13 @@ export interface DynamicToolSelection {
  * Selects a small, relevant tool batch without inventing a provider-side
  * `search_tools` execution contract. The VS Code host still owns execution;
  * Kimi only receives the selected declarations.
+ *
+ * NOTE: this is a keyword-scored approximation of the kimi-code progressive
+ * disclosure protocol (`<tools_added>` announcements + the `select_tools`
+ * load-by-exact-name builtin). We cannot implement the full protocol here
+ * because the VS Code host owns tool execution and the extension cannot
+ * inject a synthetic tool the host will honor. Do not "align" this with
+ * kimi-code's agent-core implementation — the constraints differ.
  */
 export function selectDynamicTools(
     tools: KimiTool[] | undefined,
@@ -1076,29 +1083,39 @@ export function selectDynamicTools(
             ].join(' ').toLowerCase();
             let score = 0;
             for (const term of terms) {
-                if (searchable.includes(term)) score += tool.function.name.toLowerCase().includes(term) ? 4 : 1;
+                if (searchable.includes(term)) {
+                    score += tool.function.name.toLowerCase().includes(term) ? 4 : 1;
+                }
             }
             return { tool, index, score };
         });
         ranked.sort((left, right) => right.score - left.score || left.index - right.index);
 
+        const toKimiTool = (tool: KimiTool): KimiTool => ({
+            ...tool,
+            function: {
+                ...tool.function,
+                description: tool.function.description ?? '',
+                parameters: tool.function.parameters ?? {
+                    type: 'object',
+                    properties: {},
+                },
+            },
+        });
+
+        // Relevant tools first; zero-score candidates only fill a bounded
+        // fallback batch when nothing matched at all, so irrelevant
+        // inventories do not leak arbitrary first-N definitions.
+        const matches = ranked.filter((candidate) => candidate.score > 0);
+        const pool = matches.length > 0 ? matches : ranked.slice(0, 8);
+
         const selected: KimiTool[] = [];
         const selectedNames = new Set<string>();
         let bytes = 0;
-        for (const candidate of ranked) {
+        for (const candidate of pool) {
             if (selected.length >= Math.max(1, Math.floor(options.maxCount))) break;
             if (selectedNames.has(candidate.tool.function.name)) continue;
-            const dynamicTool: KimiTool = {
-                ...candidate.tool,
-                function: {
-                    ...candidate.tool.function,
-                    description: candidate.tool.function.description ?? '',
-                    parameters: candidate.tool.function.parameters ?? {
-                        type: 'object',
-                        properties: {},
-                    },
-                },
-            };
+            const dynamicTool = toKimiTool(candidate.tool);
             const candidateBytes = Buffer.byteLength(JSON.stringify(dynamicTool), 'utf8');
             if (selected.length > 0 && bytes + candidateBytes > options.maxBytes) continue;
             selected.push(dynamicTool);
@@ -1107,18 +1124,7 @@ export function selectDynamicTools(
         }
 
         if (selected.length === 0) {
-            const fallback = ranked[0].tool;
-            selected.push({
-                ...fallback,
-                function: {
-                    ...fallback.function,
-                    description: fallback.function.description ?? '',
-                    parameters: fallback.function.parameters ?? {
-                        type: 'object',
-                        properties: {},
-                    },
-                },
-            });
+            selected.push(toKimiTool(ranked[0].tool));
         }
         return {
             topLevelTools: undefined,

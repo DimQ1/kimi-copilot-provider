@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.12] - 2026-08-04
+
+### Fixed
+- **Dynamic tool batch relevance**: tool selection no longer pads batches with zero-score definitions up to `dynamicToolMaxCount`; only keyword-matched tools are selected, with a bounded fallback batch (up to 8) when nothing matches.
+- **`tool_choice` wire shape**: `tool_choice: "auto"` is now sent only alongside top-level `tools[]`, matching the kosong reference provider; the dynamic-loading path (message-level `messages[].tools`) no longer emits it. Verified against the live Kimi API.
+
 ## [1.9.11] - 2026-08-04
 
 ### Fixed

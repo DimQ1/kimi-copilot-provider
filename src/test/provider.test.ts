@@ -1,7 +1,8 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
 import { buildKimiRequest, convertMessages, convertTools, extractTextContent, resolveReasoningEffort, resolveReasoningEffortFromOptions, formatThinkingAsText, tryReportThinkingPart, parseRetryAfterHeader, computeBackoffDelayMs, stripImagesToMarkers, isSupportedImageMimeType, MAX_IMAGE_PAYLOAD_BYTES, MAX_STREAM_TOOL_ARGUMENT_CHARS, MAX_STREAM_TOOL_ARGUMENT_TOTAL_CHARS, MAX_STREAM_TOOL_CALLS, MAX_TOOL_DESCRIPTION_CHARS, StreamingToolCallAccumulator, StreamingUsageAccumulator, parseToolCallArguments, selectDynamicTools } from '../provider';
-import type { KimiRequest } from '../types';
+import { KimiRequestBuilder } from '../request-builder';
+import type { KimiMessage, KimiRequest } from '../types';
 import { MODELS, toChatInfo } from '../models';
 import { applyServerModels, MAX_SERVER_MODELS, sanitizeServerModels } from '../models-client';
 import { isQuotaExhaustedError, createErrorChain } from '../error-handlers';
@@ -278,7 +279,9 @@ suite('provider helpers', () => {
                 });
 
                 assert.strictEqual(result.topLevelTools, undefined);
-                assert.strictEqual(result.loadedCount, 4);
+                // Only the relevant tool is selected — zero-score tools no
+                // longer fill the batch up to maxCount.
+                assert.strictEqual(result.loadedCount, 1);
                 assert.strictEqual(result.dynamicTools[0].function.name, 'create_github_pr');
 
                 const dynamicMessage = {
@@ -302,6 +305,60 @@ suite('provider helpers', () => {
                 });
                 assert.strictEqual(result.topLevelTools, tools);
                 assert.deepStrictEqual(result.dynamicTools, []);
+            });
+
+            test('keeps all tools top-level when dynamic loading is disabled, even for large inventories', () => {
+                const tools: KimiTool[] = Array.from({ length: 64 }, (_, index) => ({
+                    type: 'function',
+                    function: { name: `tool_${index}`, description: 'd', parameters: { type: 'object' } },
+                }));
+                const result = selectDynamicTools(tools, [{ role: 'user', content: 'anything' }], {
+                    enabled: false,
+                    maxCount: 4,
+                    maxBytes: 1024,
+                });
+                assert.strictEqual(result.topLevelTools, tools);
+                assert.deepStrictEqual(result.dynamicTools, []);
+                assert.strictEqual(result.loadedCount, 0);
+            });
+
+            test('bounds the zero-match fallback batch instead of filling up to maxCount', () => {
+                const tools: KimiTool[] = Array.from({ length: 40 }, (_, index) => ({
+                    type: 'function',
+                    function: { name: `tool_${index}`, description: 'Unrelated utility', parameters: { type: 'object' } },
+                }));
+                const result = selectDynamicTools(tools, [{ role: 'user', content: 'zzz no overlap qqq' }], {
+                    enabled: true,
+                    maxCount: 32,
+                    maxBytes: 256 * 1024,
+                });
+                assert.strictEqual(result.topLevelTools, undefined);
+                assert.ok(result.loadedCount <= 8, `expected bounded fallback, got ${result.loadedCount}`);
+                assert.strictEqual(result.dynamicTools[0].function.name, 'tool_0');
+            });
+
+            test('trims the selected batch to the byte budget', () => {
+                const bigSchema = {
+                    type: 'object',
+                    properties: { blob: { type: 'string', description: 'x'.repeat(1024) } },
+                };
+                const tools: KimiTool[] = Array.from({ length: 40 }, (_, index) => ({
+                    type: 'function',
+                    function: {
+                        name: `report_tool_${index}`,
+                        description: 'Generates a report',
+                        parameters: index === 0 ? { type: 'object' } : bigSchema,
+                    },
+                }));
+                const result = selectDynamicTools(tools, [{ role: 'user', content: 'generate a report' }], {
+                    enabled: true,
+                    maxCount: 32,
+                    maxBytes: 4 * 1024,
+                });
+                assert.strictEqual(result.topLevelTools, undefined);
+                assert.ok(result.loadedCount >= 1);
+                const serialized = Buffer.byteLength(JSON.stringify(result.dynamicTools), 'utf8');
+                assert.ok(serialized <= 4 * 1024 + 2048, `batch too large: ${serialized} bytes`);
             });
         });
 
@@ -375,6 +432,44 @@ suite('provider helpers', () => {
             }] as vscode.LanguageModelChatTool[];
 
             assert.throws(() => convertTools(true, tools), /schema is too large/i);
+        });
+    });
+
+    suite('KimiRequestBuilder tool wiring', () => {
+        const tool: KimiTool = {
+            type: 'function',
+            function: { name: 'get_weather', description: 'Weather', parameters: { type: 'object', properties: {} } },
+        };
+        const messages: KimiMessage[] = [{ role: 'user', content: 'hi' }];
+
+        test('sends tool_choice only alongside top-level tools', () => {
+            const request = new KimiRequestBuilder('kimi-k3', 'kimi-k3')
+                .withMessages(messages)
+                .withStreaming(false)
+                .withToolCalling(true, [tool])
+                .build();
+            assert.deepStrictEqual(request.tools, [tool]);
+            assert.strictEqual(request.tool_choice, 'auto');
+        });
+
+        test('omits tool_choice when dynamic loading leaves no top-level tools', () => {
+            const request = new KimiRequestBuilder('kimi-k3', 'kimi-k3')
+                .withMessages(messages)
+                .withStreaming(false)
+                .withToolCalling(true, undefined)
+                .build();
+            assert.strictEqual(request.tools, undefined);
+            assert.strictEqual(request.tool_choice, undefined);
+        });
+
+        test('omits tools and tool_choice when tool calling is disabled', () => {
+            const request = new KimiRequestBuilder('kimi-k3', 'kimi-k3')
+                .withMessages(messages)
+                .withStreaming(false)
+                .withToolCalling(false, [tool])
+                .build();
+            assert.strictEqual(request.tools, undefined);
+            assert.strictEqual(request.tool_choice, undefined);
         });
     });
 

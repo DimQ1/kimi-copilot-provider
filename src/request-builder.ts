@@ -244,11 +244,12 @@ export class KimiRequestBuilder {
 			};
 		}
 
-		// Tools
-		if (this._toolCallingEnabled) {
-			if (this._tools && this._tools.length > 0) {
-				request.tools = this._tools;
-			}
+// Tools. Send `tool_choice` only alongside top-level `tools[]` —
+            // the dynamic-loading path (message-level `messages[].tools`) carries
+            // no top-level tools, and the kosong reference provider never sends
+            // `tool_choice` at all.
+            if (this._toolCallingEnabled && this._tools && this._tools.length > 0) {
+                    request.tools = this._tools;
 			request.tool_choice = 'auto';
 		}
 
