@@ -27,7 +27,6 @@ export const MAX_STREAM_TOOL_CALLS = 128;
 export const MAX_STREAM_TOOL_NAME_CHARS = 1024;
 export const MAX_STREAM_TOOL_ARGUMENT_CHARS = 256 * 1024;
 export const MAX_STREAM_TOOL_ARGUMENT_TOTAL_CHARS = 1024 * 1024;
-export const MAX_REQUEST_TOOLS = 128;
 export const MAX_TOOL_NAME_CHARS = 1024;
 export const MAX_TOOL_DESCRIPTION_CHARS = 64 * 1024;
 export const MAX_TOOL_SCHEMA_BYTES = 256 * 1024;
@@ -1006,12 +1005,6 @@ export function convertTools(
     if (!toolCallingCapability || !tools || tools.length === 0) {
         return undefined;
     }
-    if (tools.length > MAX_REQUEST_TOOLS) {
-        throw new vscode.LanguageModelError(
-            `Too many tools for one Kimi request (${tools.length}); the provider limit is ${MAX_REQUEST_TOOLS}.`,
-        );
-    }
-
     const converted: KimiTool[] = [];
     let totalBytes = 0;
     for (const tool of tools) {

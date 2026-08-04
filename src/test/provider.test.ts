@@ -1,6 +1,6 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
-import { buildKimiRequest, convertMessages, convertTools, extractTextContent, resolveReasoningEffort, resolveReasoningEffortFromOptions, formatThinkingAsText, tryReportThinkingPart, parseRetryAfterHeader, computeBackoffDelayMs, stripImagesToMarkers, isSupportedImageMimeType, MAX_IMAGE_PAYLOAD_BYTES, MAX_REQUEST_TOOLS, MAX_STREAM_TOOL_ARGUMENT_CHARS, MAX_STREAM_TOOL_ARGUMENT_TOTAL_CHARS, MAX_STREAM_TOOL_CALLS, MAX_TOOL_DESCRIPTION_CHARS, StreamingToolCallAccumulator, StreamingUsageAccumulator, parseToolCallArguments } from '../provider';
+import { buildKimiRequest, convertMessages, convertTools, extractTextContent, resolveReasoningEffort, resolveReasoningEffortFromOptions, formatThinkingAsText, tryReportThinkingPart, parseRetryAfterHeader, computeBackoffDelayMs, stripImagesToMarkers, isSupportedImageMimeType, MAX_IMAGE_PAYLOAD_BYTES, MAX_STREAM_TOOL_ARGUMENT_CHARS, MAX_STREAM_TOOL_ARGUMENT_TOTAL_CHARS, MAX_STREAM_TOOL_CALLS, MAX_TOOL_DESCRIPTION_CHARS, StreamingToolCallAccumulator, StreamingUsageAccumulator, parseToolCallArguments } from '../provider';
 import type { KimiRequest } from '../types';
 import { MODELS, toChatInfo } from '../models';
 import { applyServerModels, MAX_SERVER_MODELS, sanitizeServerModels } from '../models-client';
@@ -286,14 +286,14 @@ suite('provider helpers', () => {
             assert.deepStrictEqual(result, expected);
         });
 
-        test('rejects an unbounded number of tool definitions', () => {
-            const tools = Array.from({ length: MAX_REQUEST_TOOLS + 1 }, (_, index) => ({
+        test('converts more than 128 tool definitions when within byte budgets', () => {
+            const tools = Array.from({ length: 289 }, (_, index) => ({
                 name: `tool${index}`,
                 description: 'tool',
                 inputSchema: { type: 'object' },
             })) as vscode.LanguageModelChatTool[];
 
-            assert.throws(() => convertTools(true, tools), /Too many tools/);
+            assert.strictEqual(convertTools(true, tools)?.length, 289);
         });
 
         test('rejects oversized tool descriptions before request construction', () => {
