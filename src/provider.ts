@@ -570,6 +570,7 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
                         this.outputChannel,
                         this.usageTracker,
                         this.reasoningDialect,
+                        chatResult.signal,
                     );
                     this.outputChannel.info(
                         `← stream done: TTFT ${timing.ttftMs}ms, decode ${timing.streamDurationMs}ms, ${timing.chunkCount} chunks, network ${networkTime}ms, total ${Date.now() - startTime}ms`,
@@ -1412,6 +1413,7 @@ async function streamOpenAIResponse(
     outputChannel: vscode.LogOutputChannel,
     usageTracker: UsageTracker,
     reasoningDialect: ReasoningKeyDialect,
+    signal: AbortSignal,
 ): Promise<StreamTiming> {
     const streamStart = Date.now();
     let firstChunkAt: number | undefined;
@@ -1527,6 +1529,12 @@ async function streamOpenAIResponse(
             throw err; // Let the caller's error handler deal with it
         }
         throw err;
+    }
+
+    if (signal.aborted && !token.isCancellationRequested) {
+        throw new vscode.LanguageModelError(
+            'Kimi API stream timed out before a complete response was received. Increase "kimiCopilot.timeout" and retry.',
+        );
     }
 
     // Stream ended — flush any remaining state

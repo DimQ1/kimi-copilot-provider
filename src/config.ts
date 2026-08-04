@@ -168,7 +168,7 @@ export class ConfigurationManager {
 	}
 
 	getTimeout(): number {
-		return this.config.get<number>('timeout', 60000);
+		return this.config.get<number>('timeout', 180000);
 	}
 
 	getEnableStreaming(): boolean {

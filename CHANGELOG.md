@@ -5,10 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.11] - 2026-08-04
+
+### Fixed
+- **Timeout truncation diagnostics**: incomplete SSE responses caused by the request timeout are no longer reported as successful streams, preventing malformed downstream JSON. The default timeout is now 180 seconds for long K3 reasoning/tool requests.
+
 ## [1.9.10] - 2026-08-04
 
 ### Fixed
 - **Kimi dynamic tool tokenization**: omit `content` from dynamic `system.tools` messages as required by the API, normalize missing tool descriptions/parameter schemas, and include dynamically loaded definitions in context/body accounting.
+- **Long K3 streams**: detect a timeout that otherwise appeared as a successful end-of-stream and increase the default request timeout to three minutes.
 
 ## [1.9.9] - 2026-08-04
 

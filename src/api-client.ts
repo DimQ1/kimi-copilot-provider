@@ -53,6 +53,8 @@ export interface ChatResult {
 	traceId: string | null;
 	/** Whether the response is a stream. */
 	isStream: boolean;
+	/** The request signal, used to distinguish timeout truncation from EOF. */
+	signal: AbortSignal;
 	/** Releases request-scoped timeout and cancellation listeners. Idempotent. */
 	dispose: () => void;
 }
@@ -160,6 +162,7 @@ export class KimiApiClient {
 						: resultData,
 					traceId,
 					isStream,
+					signal,
 					dispose: isStream ? cleanup : () => {},
 				};
 			} catch (err) {
