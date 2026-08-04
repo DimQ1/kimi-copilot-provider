@@ -88,6 +88,9 @@ function estimateMessageTokens(message: KimiMessage): number {
 			tokens += Math.max(1, Math.ceil(tc.function.arguments.length / 3.5));
 		}
 	}
+	if (message.tools && message.tools.length > 0) {
+		tokens += Math.max(1, Math.ceil(Buffer.byteLength(JSON.stringify(message.tools), 'utf8') / 3.5));
+	}
 
 	return tokens + overhead;
 }
@@ -231,6 +234,9 @@ export function estimateRequestBodyBytes(messages: KimiMessage[]): number {
 				bytes += Buffer.byteLength(tc.function.name, 'utf8');
 				bytes += Buffer.byteLength(tc.function.arguments, 'utf8');
 			}
+		}
+		if (message.tools) {
+			bytes += Buffer.byteLength(JSON.stringify(message.tools), 'utf8');
 		}
 	}
 	return bytes + JSON_OVERHEAD_BYTES;

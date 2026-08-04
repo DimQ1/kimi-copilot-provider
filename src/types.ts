@@ -18,7 +18,8 @@ export interface ModelPricing {
 
 export interface KimiMessage {
 	role: 'system' | 'user' | 'assistant' | 'tool';
-	content: string | KimiContentPart[];
+	/** Omitted for Kimi dynamic-tool system messages. */
+	content?: string | KimiContentPart[];
 	/** Tools become visible from this message onward (Kimi dynamic loading). */
 	tools?: KimiTool[];
 	tool_call_id?: string;

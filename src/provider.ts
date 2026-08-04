@@ -470,7 +470,6 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
                 ...normalizedMessages,
                 {
                     role: 'system',
-                    content: '',
                     tools: dynamicToolSelection.dynamicTools,
                 },
             ];
@@ -1060,7 +1059,10 @@ export function selectDynamicTools(
             .slice(-4)
             .map((message) => typeof message.content === 'string'
                 ? message.content
-                : message.content.filter((part) => part.type === 'text').map((part) => part.text).join(' '))
+                : (message.content ?? [])
+                    .filter((part) => part.type === 'text')
+                    .map((part) => part.text)
+                    .join(' '))
             .join(' ')
             .toLowerCase();
         const terms = new Set(query.match(/[a-z0-9_:-]{2,}/gi)?.map((term) => term.toLowerCase()) ?? []);
@@ -1080,17 +1082,42 @@ export function selectDynamicTools(
         ranked.sort((left, right) => right.score - left.score || left.index - right.index);
 
         const selected: KimiTool[] = [];
+        const selectedNames = new Set<string>();
         let bytes = 0;
         for (const candidate of ranked) {
             if (selected.length >= Math.max(1, Math.floor(options.maxCount))) break;
-            const candidateBytes = Buffer.byteLength(JSON.stringify(candidate.tool), 'utf8');
+            if (selectedNames.has(candidate.tool.function.name)) continue;
+            const dynamicTool: KimiTool = {
+                ...candidate.tool,
+                function: {
+                    ...candidate.tool.function,
+                    description: candidate.tool.function.description ?? '',
+                    parameters: candidate.tool.function.parameters ?? {
+                        type: 'object',
+                        properties: {},
+                    },
+                },
+            };
+            const candidateBytes = Buffer.byteLength(JSON.stringify(dynamicTool), 'utf8');
             if (selected.length > 0 && bytes + candidateBytes > options.maxBytes) continue;
-            selected.push(candidate.tool);
+            selected.push(dynamicTool);
+            selectedNames.add(dynamicTool.function.name);
             bytes += candidateBytes;
         }
 
         if (selected.length === 0) {
-            selected.push(ranked[0].tool);
+            const fallback = ranked[0].tool;
+            selected.push({
+                ...fallback,
+                function: {
+                    ...fallback.function,
+                    description: fallback.function.description ?? '',
+                    parameters: fallback.function.parameters ?? {
+                        type: 'object',
+                        properties: {},
+                    },
+                },
+            });
         }
         return {
             topLevelTools: undefined,

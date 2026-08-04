@@ -280,6 +280,14 @@ suite('provider helpers', () => {
                 assert.strictEqual(result.topLevelTools, undefined);
                 assert.strictEqual(result.loadedCount, 4);
                 assert.strictEqual(result.dynamicTools[0].function.name, 'create_github_pr');
+
+                const dynamicMessage = {
+                    role: 'system' as const,
+                    tools: result.dynamicTools,
+                };
+                const wireMessage = JSON.parse(JSON.stringify(dynamicMessage)) as Record<string, unknown>;
+                assert.strictEqual(wireMessage.content, undefined);
+                assert.ok(Array.isArray(wireMessage.tools));
             });
 
             test('keeps all tools top-level when dynamic loading is disabled or unnecessary', () => {
