@@ -24,6 +24,19 @@ export interface KimiMessage {
 	tools?: KimiTool[];
 	tool_call_id?: string;
 	tool_calls?: KimiToolCall[];
+	/**
+	 * Partial Mode marker (Kimi API): when true on the last assistant message,
+	 * the model continues generating from `content` instead of replying from
+	 * scratch. Used by the auto-continue flow to resume output truncated by
+	 * the max_tokens/max_completion_tokens budget (finish_reason: "length").
+	 */
+	partial?: boolean;
+	/**
+	 * Reasoning content echoed back alongside a partial assistant message.
+	 * Thinking models require it so the continuation resumes with the same
+	 * chain of thought (see the Kimi Partial Mode guide).
+	 */
+	reasoning_content?: string;
 }
 
 export type KimiContentPart = KimiTextContentPart | KimiImageContentPart;

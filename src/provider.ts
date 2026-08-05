@@ -551,42 +551,92 @@ export class KimiChatProvider implements vscode.LanguageModelChatProvider {
         const startTime = Date.now();
 
         try {
-            const chatResult = await apiClient.chat(request, token);
-            try {
+            const maxContinuations = extras?.testMode ? 0 : this.configManager.getAutoContinueMaxContinuations();
+            let continuationCount = 0;
+            let continuationContent = '';
+            let continuationReasoning = '';
 
-                // Log trace-id for request diagnostics (available from response headers
-                // before the stream body, via the OpenAI SDK's withResponse()).
-                if (chatResult.traceId) {
-                    this.outputChannel.info(`trace-id: ${chatResult.traceId}`);
+            for (;;) {
+                const chatResult = await apiClient.chat(request, token);
+                let outcome: StreamOutcome | undefined;
+                try {
+
+                    // Log trace-id for request diagnostics (available from response headers
+                    // before the stream body, via the OpenAI SDK's withResponse()).
+                    if (chatResult.traceId) {
+                        this.outputChannel.info(`trace-id: ${chatResult.traceId}`);
+                    }
+
+                    const networkTime = Date.now() - startTime;
+
+                    if (chatResult.isStream) {
+                        outcome = await streamOpenAIResponse(
+                            chatResult.data as AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
+                            progress,
+                            token,
+                            this.outputChannel,
+                            this.usageTracker,
+                            this.reasoningDialect,
+                            chatResult.signal,
+                        );
+                        this.outputChannel.info(
+                            `← stream done: TTFT ${outcome.ttftMs}ms, decode ${outcome.streamDurationMs}ms, ${outcome.chunkCount} chunks, network ${networkTime}ms, total ${Date.now() - startTime}ms`,
+                        );
+                    } else {
+                        await completeOpenAIResponse(
+                            chatResult.data as OpenAI.Chat.Completions.ChatCompletion,
+                            progress,
+                            this.outputChannel,
+                            this.usageTracker,
+                            this.reasoningDialect,
+                        );
+                        this.outputChannel.info(`← completed in ${Date.now() - startTime}ms (non-streaming)`);
+                    }
+                } finally {
+                    chatResult.dispose();
                 }
 
-                const networkTime = Date.now() - startTime;
-
-                if (chatResult.isStream) {
-                    const timing = await streamOpenAIResponse(
-                        chatResult.data as AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
-                        progress,
-                        token,
-                        this.outputChannel,
-                        this.usageTracker,
-                        this.reasoningDialect,
-                        chatResult.signal,
-                    );
-                    this.outputChannel.info(
-                        `← stream done: TTFT ${timing.ttftMs}ms, decode ${timing.streamDurationMs}ms, ${timing.chunkCount} chunks, network ${networkTime}ms, total ${Date.now() - startTime}ms`,
-                    );
-                } else {
-                    await completeOpenAIResponse(
-                        chatResult.data as OpenAI.Chat.Completions.ChatCompletion,
-                        progress,
-                        this.outputChannel,
-                        this.usageTracker,
-                        this.reasoningDialect,
-                    );
-                    this.outputChannel.info(`← completed in ${Date.now() - startTime}ms (non-streaming)`);
+                // ── Auto-continue truncated replies via Kimi Partial Mode ──
+                // When the reply was cut off by the output budget
+                // (finish_reason: "length"), resend the accumulated reply as a
+                // partial assistant message so the model resumes where it
+                // stopped. Text replies only: tool-call turns are never
+                // continued because resuming mid-arguments corrupts the JSON.
+                if (
+                    !outcome ||
+                    outcome.finishReason !== 'length' ||
+                    outcome.hadToolCalls ||
+                    outcome.content.length === 0 ||
+                    continuationCount >= maxContinuations ||
+                    token.isCancellationRequested
+                ) {
+                    if (outcome?.finishReason === 'length') {
+                        if (outcome.hadToolCalls) {
+                            this.outputChannel.warn(
+                                'Reply truncated by output budget during tool calls — auto-continue skipped (tool-call turns cannot be resumed safely).',
+                            );
+                        } else if (!outcome.hadToolCalls && outcome.content.length > 0 && continuationCount >= maxContinuations && maxContinuations > 0) {
+                            this.outputChannel.warn(
+                                `Reply still truncated after ${maxContinuations} auto-continuation(s) — giving up. Raise kimiCopilot.autoContinueMaxContinuations or the model's maxOutputTokens.`,
+                            );
+                        }
+                    }
+                    break;
                 }
-            } finally {
-                chatResult.dispose();
+
+                continuationCount++;
+                continuationContent += outcome.content;
+                continuationReasoning += outcome.reasoningContent;
+                this.outputChannel.info(
+                    `Auto-continue ${continuationCount}/${maxContinuations}: reply truncated by output budget — resuming via Partial Mode (${continuationContent.length} chars retained as prefix).`,
+                );
+                request = {
+                    ...request,
+                    messages: [
+                        ...request.messages,
+                        buildPartialContinuationMessage(continuationContent, continuationReasoning),
+                    ],
+                };
             }
 
             this.updateRequestState(
@@ -932,6 +982,21 @@ export const MAX_IMAGE_PAYLOAD_BYTES = Math.floor(DEFAULT_MAX_BODY_BYTES * 0.75)
 
 export function isSupportedImageMimeType(mimeType: string): boolean {
     return SUPPORTED_IMAGE_MIME_TYPES.has(mimeType.toLowerCase());
+}
+
+/**
+ * Builds the partial assistant message that makes the Kimi API resume a
+ * truncated reply (Partial Mode): role=assistant + partial=true with the
+ * already-streamed content as the prefix. Thinking models additionally get
+ * their accumulated reasoning echoed back via reasoning_content.
+ */
+export function buildPartialContinuationMessage(content: string, reasoningContent: string): KimiMessage {
+    return {
+        role: 'assistant',
+        content,
+        partial: true,
+        ...(reasoningContent.length > 0 ? { reasoning_content: reasoningContent } : {}),
+    };
 }
 
 /**
@@ -1319,6 +1384,18 @@ interface StreamTiming {
     chunkCount: number;
 }
 
+/** Result of one streamed attempt, including the accumulated reply state. */
+interface StreamOutcome extends StreamTiming {
+    /** finish_reason of the last chunk ('length' when the budget ran out). */
+    finishReason: string | null;
+    /** All visible text content streamed in this attempt. */
+    content: string;
+    /** All reasoning/thinking content streamed in this attempt. */
+    reasoningContent: string;
+    /** Whether any tool-call deltas were observed (never auto-continued). */
+    hadToolCalls: boolean;
+}
+
 export interface StreamingToolCallFragment {
     index: number;
     id?: string;
@@ -1420,10 +1497,14 @@ async function streamOpenAIResponse(
     usageTracker: UsageTracker,
     reasoningDialect: ReasoningKeyDialect,
     signal: AbortSignal,
-): Promise<StreamTiming> {
+): Promise<StreamOutcome> {
     const streamStart = Date.now();
     let firstChunkAt: number | undefined;
     let chunkCount = 0;
+    let finishReason: string | null = null;
+    let accumulatedContent = '';
+    let accumulatedReasoning = '';
+    let hadToolCalls = false;
     const usageAccumulator = new StreamingUsageAccumulator();
 
     const pendingToolCalls = new StreamingToolCallAccumulator(outputChannel);
@@ -1464,6 +1545,7 @@ async function streamOpenAIResponse(
     };
 
     const handleReasoningDelta = (text: string): void => {
+        accumulatedReasoning += text;
         if (thinkingPartAvailable === undefined) {
             const success = tryReportThinkingPart(progress, text);
             thinkingPartAvailable = success;
@@ -1507,7 +1589,9 @@ async function streamOpenAIResponse(
             if (typeof delta['content'] === 'string' && (delta['content'] as string).length > 0) {
                 if (fallbackReasoningBuffer) flushFallbackReasoning();
                 if (thinkingPartAvailable === undefined) thinkingPartAvailable = false;
-                progress.report(new vscode.LanguageModelTextPart(delta['content'] as string));
+                const contentDelta = delta['content'] as string;
+                accumulatedContent += contentDelta;
+                progress.report(new vscode.LanguageModelTextPart(contentDelta));
             }
 
             // Tool calls
@@ -1519,6 +1603,7 @@ async function streamOpenAIResponse(
             }> | undefined;
 
             if (toolCalls) {
+                hadToolCalls = true;
                 for (const tc of toolCalls) {
                     pendingToolCalls.append(tc);
                 }
@@ -1526,6 +1611,7 @@ async function streamOpenAIResponse(
 
             // Emit completed tool calls on finish
             if (choice.finish_reason) {
+                finishReason = choice.finish_reason;
                 if (fallbackReasoningBuffer) flushFallbackReasoning();
                 emitPendingToolCalls();
             }
@@ -1557,6 +1643,10 @@ async function streamOpenAIResponse(
         ttftMs: firstChunkAt !== undefined ? firstChunkAt - streamStart : streamEnd - streamStart,
         streamDurationMs: firstChunkAt !== undefined ? streamEnd - firstChunkAt : 0,
         chunkCount,
+        finishReason,
+        content: accumulatedContent,
+        reasoningContent: accumulatedReasoning,
+        hadToolCalls,
     };
 }
 

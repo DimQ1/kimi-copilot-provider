@@ -314,6 +314,13 @@
           "default": true,
           "description": "When a request exceeds the token limit, automatically trigger Copilot Chat compaction (/compact) and show a warning. The user is notified only once per session."
         },
+        "kimiCopilot.autoContinueMaxContinuations": {
+          "type": "number",
+          "default": 2,
+          "minimum": 0,
+          "maximum": 8,
+          "description": "Automatically continue a reply truncated by the output budget (finish_reason: \"length\") using Kimi Partial Mode: the partial reply is sent back as a partial assistant message and the model resumes where it stopped. 0 disables the feature. Text replies only — tool-call turns are never continued."
+        },
         "kimiCopilot.maxRetries": {
           "type": "number",
           "default": 5,

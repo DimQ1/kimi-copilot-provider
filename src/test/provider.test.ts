@@ -1,6 +1,6 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
-import { buildKimiRequest, convertMessages, convertTools, extractTextContent, resolveReasoningEffort, resolveReasoningEffortFromOptions, formatThinkingAsText, tryReportThinkingPart, parseRetryAfterHeader, computeBackoffDelayMs, stripImagesToMarkers, isSupportedImageMimeType, MAX_IMAGE_PAYLOAD_BYTES, MAX_STREAM_TOOL_ARGUMENT_CHARS, MAX_STREAM_TOOL_ARGUMENT_TOTAL_CHARS, MAX_STREAM_TOOL_CALLS, MAX_TOOL_DESCRIPTION_CHARS, StreamingToolCallAccumulator, StreamingUsageAccumulator, parseToolCallArguments, selectDynamicTools } from '../provider';
+import { buildKimiRequest, convertMessages, convertTools, extractTextContent, resolveReasoningEffort, resolveReasoningEffortFromOptions, formatThinkingAsText, tryReportThinkingPart, parseRetryAfterHeader, computeBackoffDelayMs, stripImagesToMarkers, buildPartialContinuationMessage, isSupportedImageMimeType, MAX_IMAGE_PAYLOAD_BYTES, MAX_STREAM_TOOL_ARGUMENT_CHARS, MAX_STREAM_TOOL_ARGUMENT_TOTAL_CHARS, MAX_STREAM_TOOL_CALLS, MAX_TOOL_DESCRIPTION_CHARS, StreamingToolCallAccumulator, StreamingUsageAccumulator, parseToolCallArguments, selectDynamicTools } from '../provider';
 import { KimiRequestBuilder } from '../request-builder';
 import type { KimiMessage, KimiRequest } from '../types';
 import { MODELS, toChatInfo } from '../models';
@@ -211,6 +211,30 @@ suite('provider helpers', () => {
             const result = convertMessages(messages);
             assert.strictEqual(result.length, 2);
             assert.ok(result.every((m) => m.role === 'user'));
+        });
+    });
+
+    suite('partial continuation message (auto-continue)', () => {
+        test('marks the message as a partial assistant prefix', () => {
+            assert.deepStrictEqual(buildPartialContinuationMessage('Dear customer, hel', ''), {
+                role: 'assistant',
+                content: 'Dear customer, hel',
+                partial: true,
+            });
+        });
+
+        test('echoes accumulated reasoning for thinking models', () => {
+            assert.deepStrictEqual(buildPartialContinuationMessage('truncated text', 'some chain of thought'), {
+                role: 'assistant',
+                content: 'truncated text',
+                partial: true,
+                reasoning_content: 'some chain of thought',
+            });
+        });
+
+        test('omits reasoning_content when no reasoning was streamed', () => {
+            const message = buildPartialContinuationMessage('text', '');
+            assert.strictEqual('reasoning_content' in message, false);
         });
     });
 

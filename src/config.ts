@@ -252,6 +252,17 @@ export class ConfigurationManager {
 		return this.config.get<boolean>('autoCompactOnLimit', true);
 	}
 
+	/**
+	 * Max auto-continue iterations after finish_reason "length" (Kimi Partial
+	 * Mode). 0 disables the feature. Each continuation resends the truncated
+	 * reply as a partial assistant message so the model resumes where it
+	 * stopped instead of starting over.
+	 */
+	getAutoContinueMaxContinuations(): number {
+		const value = this.config.get<number>('autoContinueMaxContinuations', 2);
+		return Math.max(0, Math.min(value, 8));
+	}
+
 	/** Max retry attempts for retryable API errors (429 / 5xx). */
 	getMaxRetries(): number {
 		const value = this.config.get<number>('maxRetries', 5);
