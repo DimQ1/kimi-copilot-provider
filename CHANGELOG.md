@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.0] - 2026-08-05
+
+### Added
+- **Kimi K3 256K model** (`kimi-k3-256k`): the Moderato+ tier 256K-context variant of K3, with reasoning effort `low / high / max` (default `high`), image input, and no video input. The API id `k3-256k` is mapped to the picker id so the live `/models` catalog overrides apply. Verified against the official Kimi Code models documentation and the live `GET /coding/v1/models` catalog.
+
+### Fixed
+- **Official Kimi Code model IDs**: picker IDs are now translated to the API IDs expected by the coding endpoint (`k3`, `k3-256k`, `kimi-for-coding`, and `kimi-for-coding-highspeed`), preventing 401 errors such as `other:kimi-k3-256k`.
+
 ## [1.9.12] - 2026-08-04
 
 ### Fixed

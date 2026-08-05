@@ -44,6 +44,28 @@ export const MODELS: ModelDefinition[] = [
 		multiTierContext: { default: 1048576, allegretto: 1048576 },
 	},
 	{
+		id: 'kimi-k3-256k',
+		name: 'Kimi K3 256K',
+		family: 'kimi',
+		version: 'kimi-k3-256k',
+		detail: 'Kimi K3 256K Context Version (Moderato+): consistent performance in a 256K window, ~2x cheaper token consumption than k3 (1M), reasoning effort low / high / max; no video input.',
+		maxInputTokens: 262144,
+		maxOutputTokens: 32768,
+		capabilities: {
+			toolCalling: true,
+			imageInput: true,
+			thinking: true,
+		},
+		requestPolicy: 'k3',
+		defaults: {
+			reasoningEffort: 'high',
+			requestPolicy: 'k3',
+		},
+		reasoningEfforts: ['low', 'high', 'max'],
+		priceCategory: 'medium',
+		singleRequestLimit: 262144,
+	},
+	{
 		id: 'kimi-k2.7-code',
 		name: 'Kimi K2.7 Code',
 		family: 'kimi',

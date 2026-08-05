@@ -8,9 +8,18 @@ import { applyServerModels, MAX_SERVER_MODELS, sanitizeServerModels } from '../m
 import { isQuotaExhaustedError, createErrorChain } from '../error-handlers';
 import type { KimiTool } from '../types';
 import { ReasoningKeyDialect } from '../reasoning-key';
+import { getDefaultApiModelId } from '../config';
 
 suite('provider helpers', () => {
     suite('Kimi K3 model', () => {
+        test('maps picker ids to official Kimi Code API ids', () => {
+            assert.strictEqual(getDefaultApiModelId('kimi-k3'), 'k3');
+            assert.strictEqual(getDefaultApiModelId('kimi-k3-256k'), 'k3-256k');
+            assert.strictEqual(getDefaultApiModelId('kimi-k2.7-code'), 'kimi-for-coding');
+            assert.strictEqual(getDefaultApiModelId('kimi-k2.7-code-highspeed'), 'kimi-for-coding-highspeed');
+            assert.strictEqual(getDefaultApiModelId('custom-model'), 'custom-model');
+        });
+
         test('is registered with the K3 API contract', () => {
             const model = MODELS.find((item) => item.id === 'kimi-k3');
             assert.ok(model);

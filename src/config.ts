@@ -15,6 +15,17 @@ const MODELS_CACHE_KEY = 'kimiCopilot.serverModels';
 
 const DEFAULT_ENDPOINT = 'https://api.kimi.com/coding/v1/chat/completions';
 
+const DEFAULT_API_MODEL_IDS: Readonly<Record<string, string>> = {
+	'kimi-k3': 'k3',
+	'kimi-k3-256k': 'k3-256k',
+	'kimi-k2.7-code': 'kimi-for-coding',
+	'kimi-k2.7-code-highspeed': 'kimi-for-coding-highspeed',
+};
+
+export function getDefaultApiModelId(vscodeModelId: string): string {
+	return DEFAULT_API_MODEL_IDS[vscodeModelId] ?? vscodeModelId;
+}
+
 export class ConfigurationManager {
 	constructor(
 		private readonly secretStorage: vscode.SecretStorage,
@@ -98,7 +109,7 @@ export class ConfigurationManager {
 		}
 
 		const overrides = this.config.get<Record<string, string>>('modelIdOverrides', {});
-		return overrides?.[vscodeModelId] ?? vscodeModelId;
+		return overrides?.[vscodeModelId] ?? getDefaultApiModelId(vscodeModelId);
 	}
 
 	getModel(): string {

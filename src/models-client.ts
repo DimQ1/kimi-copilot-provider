@@ -185,6 +185,7 @@ export async function fetchKimiModels(
 // fallback also accepts a direct id match so custom deployments work.
 const API_TO_PICKER_ID: Readonly<Record<string, string>> = {
 	'k3': 'kimi-k3',
+	'k3-256k': 'kimi-k3-256k',
 	'kimi-for-coding': 'kimi-k2.7-code',
 	'kimi-for-coding-highspeed': 'kimi-k2.7-code-highspeed',
 };
