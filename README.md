@@ -57,6 +57,37 @@ Or open VS Code Settings (`Ctrl+,`) and search for `kimiCopilot`:
 
 Press `F5` in VS Code to start the Extension Development Host. The Kimi provider will be available to Copilot Chat.
 
+### Video context in Chat
+
+Use the Kimi chat participant when the request needs a video:
+
+1. In Copilot Chat, enter `@kimi /video` followed by the question, for example `@kimi /video What happens between 00:10 and 00:20?`.
+2. Select a local video in the file picker. If the chat request did not include a question, Kimi asks for one after the file is selected.
+3. The extension uploads the file, waits until Kimi marks it `ready`, sends the question with `video_url: { url: "ms://<file-id>" }`, and returns the textual answer into the current Chat response.
+4. The temporary remote file is removed after the answer. The video is not retained as provider state; the answer is the context for the next turn.
+
+The configured `kimiCopilot.endpoint` and model mapping are used. With the default Kimi Code settings this is the proven Coding Files API flow. The participant is registered as `@kimi` with the `/video` command.
+
+If the Chat participant is unavailable, run **Kimi Copilot: Ask About Video** from the Command Palette. It follows the same upload flow, opens the answer in **Kimi Video Answers**, and offers **Copy Answer** so it can be pasted into the current chat.
+
+### Experimental video context probe
+
+Run **Kimi Copilot: Probe Video Context (Experimental)** to test the complete video flow without changing normal Copilot Chat requests. The command:
+
+1. Selects a local video file (up to 100 MB).
+2. Uploads it to the selected Files API with `purpose=video`.
+3. Waits for processing, sends `video_url: { url: "ms://<file-id>" }`, and displays the model response in the **Kimi Video Probe** output channel.
+4. Deletes the temporary remote file after the request.
+
+The command offers both the configured Kimi Code API base and the official Kimi Platform base (`https://api.moonshot.ai/v1`). It uses `KIMI_API_KEY` or `MOONSHOT_API_KEY` first, then falls back to the key stored by **Kimi Copilot: Set API Key**. Environment variables must be present when the Extension Host starts; setting one in an already running integrated terminal does not update the existing extension process. On Windows, launch the development host from a terminal where the variable is set, for example:
+
+```powershell
+$env:MOONSHOT_API_KEY = 'paste-key-here'
+code .
+```
+
+The probe is diagnostic only and keeps its endpoint/model selection UI. It never writes the API key to the output channel. For normal use, prefer `@kimi /video` or **Kimi Copilot: Ask About Video**.
+
 ## Architecture
 
 ```
@@ -65,6 +96,9 @@ src/
 ├── extension.ts   # activate(): registers provider and commands
 ├── models.ts      # Model registry + LanguageModelChatInformation mapping
 ├── provider.ts    # KimiChatProvider implements LanguageModelChatProvider
+├── video-client.ts # Files API upload, processing, video chat request, cleanup
+├── video-flow.ts  # Shared file picker and video API configuration
+├── video-chat-participant.ts # @kimi /video Chat integration
 ├── types.ts       # Shared API and model types
 └── test/          # Unit tests
 ```
@@ -105,6 +139,8 @@ The extension tracks token usage reported by the Kimi API (prompt, completion, t
 - **Kimi Copilot: Select Default Model** — choose the default model
 - **Kimi Copilot: Edit Model Configuration** — per-model JSON overrides
 - **Kimi Copilot: Test Connection** — verify connectivity and credentials
+- **Kimi Copilot: Ask About Video** — upload a video and copy the textual answer
+- **Kimi Copilot: Probe Video Context (Experimental)** — upload a video and test `video_url` context support
 - **Kimi Copilot: Show Usage Statistics** — view local token/request statistics collected from API responses
 - **Kimi Copilot: Reset Usage Statistics** — clear the local usage counters
 - **Kimi Copilot: Open Settings** — open settings directly

@@ -2,7 +2,7 @@
   "name": "kimi-copilot-provider",
   "displayName": "Kimi Copilot Provider",
   "description": "Use Kimi K3 and K2.x models in GitHub Copilot Chat — Thinking/reasoning display, vision, tool calling, zero config. 🎁 New to Kimi? Subscribe via referral and we both get up to 1-Year Membership Credits: https://kimi-bot.com/activities/viral-referral/share?scenario=subscribe&from=share_poster&invitation_code=ZKH245",
-  "version": "1.11.0",
+  "version": "1.11.2",
   "publisher": "kimi-ext",
   "license": "MIT",
   "icon": "icon.png",
@@ -22,7 +22,8 @@
     "Chat"
   ],
   "activationEvents": [
-    "onLanguageModelChatProvider:kimi-copilot"
+    "onLanguageModelChatProvider:kimi-copilot",
+    "onChatParticipant:kimi-copilot.video"
   ],
   "enabledApiProposals": [],
   "main": "./out/extension.js",
@@ -32,6 +33,20 @@
         "vendor": "kimi-copilot",
         "displayName": "Kimi Copilot Provider",
         "managementCommand": "kimi-copilot.openSettings"
+      }
+    ],
+    "chatParticipants": [
+      {
+        "id": "kimi-copilot.video",
+        "name": "kimi",
+        "description": "Select a video and ask Kimi about what happens in it.",
+        "isSticky": true,
+        "commands": [
+          {
+            "name": "video",
+            "description": "Upload a video and ask Kimi a question about it."
+          }
+        ]
       }
     ],
     "commands": [
@@ -58,6 +73,16 @@
       {
         "command": "kimi-copilot.testConnection",
         "title": "Test Connection",
+        "category": "Kimi Copilot"
+      },
+      {
+        "command": "kimi-copilot.testVideoContext",
+        "title": "Probe Video Context (Experimental)",
+        "category": "Kimi Copilot"
+      },
+      {
+        "command": "kimi-copilot.askAboutVideo",
+        "title": "Ask About Video",
         "category": "Kimi Copilot"
       },
       {

@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.2] - 2026-08-06
+
+### Added
+
+- **Video analysis in Copilot Chat**: use `@kimi /video` or **Kimi Copilot: Ask About Video** to upload a local video, receive a textual answer, and continue from that answer without retaining the raw video.
+- **Workspace indexing exclusions**: generated output, dependencies, VS Code test files, probe artifacts, Git metadata, and VSIX packages are excluded from Explorer search and file watching to reduce open-file and memory pressure.
+
 ## [1.11.0] - 2026-08-06
 
 ### Added

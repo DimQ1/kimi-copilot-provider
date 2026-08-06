@@ -17,6 +17,7 @@ Thumbs.db
 
 # IDEs
 .vscode-test/
+.vscode-kimi-coding-probe/
 *.code-workspace
 
 # Temporary files

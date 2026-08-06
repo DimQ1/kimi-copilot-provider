@@ -12,6 +12,8 @@ import { OpenKimiConsoleCommand } from './open-kimi-console';
 import { ResetUsageStatsCommand } from './reset-usage-stats';
 import { OpenSettingsCommand } from './open-settings';
 import { ShowDiagnosticsCommand } from './show-diagnostics';
+import { TestVideoContextCommand } from './test-video-context';
+import { AskAboutVideoCommand } from './ask-about-video';
 import type { ConfigurationManager } from '../config';
 import type { KimiChatProvider } from '../provider';
 import type { UsageTracker } from '../usage';
@@ -22,28 +24,30 @@ import type { KimiUsageClient } from '../usage-client';
  * Each command is a separate class (GoF Command Pattern) with its own file.
  */
 export function registerAllCommands(
-	context: vscode.ExtensionContext,
-	configManager: ConfigurationManager,
-	provider: KimiChatProvider,
-	usageTracker: UsageTracker,
-	usageClient: KimiUsageClient,
+    context: vscode.ExtensionContext,
+    configManager: ConfigurationManager,
+    provider: KimiChatProvider,
+    usageTracker: UsageTracker,
+    usageClient: KimiUsageClient,
 ): void {
-	const commands: Command[] = [
-		new SetApiKeyCommand(configManager, provider),
-		new ClearApiKeyCommand(configManager, provider),
-		new SelectModelCommand(configManager, provider),
-		new EditModelConfigCommand(configManager, provider),
-		new TestConnectionCommand(configManager, provider),
-		new ShowUsagePopupCommand(context, usageTracker),
-		new ShowUsageStatsCommand(usageTracker),
-		new RefreshQuotaCommand(configManager, usageTracker, usageClient),
-		new OpenKimiConsoleCommand(),
-		new ResetUsageStatsCommand(usageTracker),
-		new OpenSettingsCommand(),
-		new ShowDiagnosticsCommand(provider),
-	];
+    const commands: Command[] = [
+        new SetApiKeyCommand(configManager, provider),
+        new ClearApiKeyCommand(configManager, provider),
+        new SelectModelCommand(configManager, provider),
+        new EditModelConfigCommand(configManager, provider),
+        new TestConnectionCommand(configManager, provider),
+        new ShowUsagePopupCommand(context, usageTracker),
+        new ShowUsageStatsCommand(usageTracker),
+        new RefreshQuotaCommand(configManager, usageTracker, usageClient),
+        new OpenKimiConsoleCommand(),
+        new ResetUsageStatsCommand(usageTracker),
+        new OpenSettingsCommand(),
+        new ShowDiagnosticsCommand(provider),
+        new TestVideoContextCommand(configManager),
+        new AskAboutVideoCommand(configManager),
+    ];
 
-	for (const cmd of commands) {
-		cmd.register(context);
-	}
+    for (const cmd of commands) {
+        cmd.register(context);
+    }
 }

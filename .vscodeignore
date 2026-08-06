@@ -13,6 +13,8 @@ tsconfig.json
 *.log
 *.code-workspace
 out/test/**
+.vscode-kimi-coding-probe/**
+sync-reports/**
 **/eslint.config.js
 
 agent-core-review/

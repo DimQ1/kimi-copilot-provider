@@ -1,0 +1,26 @@
+{
+    "files.exclude": {
+        "**/.git": true,
+        "**/.vscode-kimi-coding-probe": true,
+        "**/.vscode-test": true,
+        "**/node_modules": true,
+        "**/out": true,
+        "**/*.vsix": true
+    },
+    "search.exclude": {
+        "**/.git": true,
+        "**/.vscode-kimi-coding-probe": true,
+        "**/.vscode-test": true,
+        "**/node_modules": true,
+        "**/out": true,
+        "**/*.vsix": true
+    },
+    "files.watcherExclude": {
+        "**/.git/**": true,
+        "**/.vscode-kimi-coding-probe/**": true,
+        "**/.vscode-test/**": true,
+        "**/node_modules/**": true,
+        "**/out/**": true,
+        "**/*.vsix": true
+    }
+}
