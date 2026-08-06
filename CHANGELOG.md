@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.0] - 2026-08-06
+
+### Added
+- **Auto-continue truncated replies** (`kimiCopilot.autoContinueMaxContinuations`): when a reply is cut off by the output budget (`finish_reason: "length"`), the partial reply is sent back as a partial assistant message via Kimi Partial Mode and the model resumes where it stopped. `0` disables the feature. Text replies only — tool-call turns are never continued.
+
 ## [1.10.0] - 2026-08-05
 
 ### Added
